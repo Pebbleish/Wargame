@@ -49,8 +49,11 @@ export const FORMATION = {
   // received; moraleTaken: multiplier on morale lost per casualty; vsCavalry: melee strength vs cavalry
   marching: { fire: 0.25, speed: 1.0, fireTaken: 1.3, moraleTaken: 1.2, vsCavalry: 0.6 },
   formation: { fire: 1.0, speed: 0.55, fireTaken: 1.0, moraleTaken: 1.0, vsCavalry: 1.0 },
-  fortified: { fire: 0.9, speed: 0.12, fireTaken: 0.55, moraleTaken: 0.5, vsCavalry: 2.5 },
+  fortified: { fire: 0.9, speed: 0.12, fireTaken: 0.7, moraleTaken: 0.65, vsCavalry: 2.0 },
 } as const;
+
+// Fortifying while already in combat only gets a hasty position: weaker than digging in properly.
+export const HASTY_FORTIFIED = { fire: 0.9, speed: 0.12, fireTaken: 0.85, moraleTaken: 0.8, vsCavalry: 1.5 } as const;
 
 // Cavalry in formation is still quick enough to charge.
 export const CAVALRY_FORMATION_SPEED = 0.85;
@@ -88,8 +91,10 @@ export const RULES = {
   rallyAt: 35,
   rallySafeDistance: 450,
   moraleRecovery: 0.6, // per second when not under pressure
-  limberTime: 5, // artillery needs this long after marching before it can fire
-  fortifyTime: 10, // digging in takes this long before the fortified bonuses apply
+  fortifyTime: 10, // digging in out of combat takes this long before the bonuses apply
+  hastyFortifyTime: 4, // a hasty position in combat is quicker to make
+  artilleryFortifyTime: 5, // guns have to set up (fortify) before they can fire
+  combatRange: 500, // a unit with a visible enemy this close, or under fire, counts as in combat
   moveSpeedScale: 4.5, // multiplies every unit's base speed
 
   artilleryCap: 3, // batteries per side, including ones on the way
@@ -97,6 +102,11 @@ export const RULES = {
   shellBlast: 45,
   shellDamage: 70, // casualties from a direct hit at full battery strength
   shellInterval: 3.5, // seconds between shells per battery
+  shellVsFortified: 1.6, // shells are the answer to dug-in troops
+  friendlyFire: 0.5, // share of shell damage your own troops take inside the circle
+
+  woodsSpotRange: 250, // units in woods are only seen by enemies this close
+  firingReveals: 5, // seconds a battery stays visible after firing from woods
 
   captureRadius: 160,
   borderWidth: 40, // impassable strip around the map edge

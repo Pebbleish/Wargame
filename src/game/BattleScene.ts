@@ -41,6 +41,7 @@ export class BattleScene extends Phaser.Scene {
   private hudTimer = 0;
   private keys: Record<string, boolean> = {};
   private pointerWorld: Vec = { x: 0, y: 0 };
+  private mapLayer: Phaser.GameObjects.GameObject[] = [];
   private aiming = false; // placing the fire circle for the selected batteries
 
   constructor() {
@@ -49,30 +50,7 @@ export class BattleScene extends Phaser.Scene {
 
   create() {
     this.newBattle();
-    // The painted map is split into tiles so it stays under the texture size limit of older graphics cards.
-    if (!this.textures.exists('terrain-0-0')) {
-      const full = paintTerrain();
-      const tw = Math.ceil(MAP.width / 2);
-      const th = Math.ceil(MAP.height / 2);
-      for (let ty = 0; ty < 2; ty++) {
-        for (let tx = 0; tx < 2; tx++) {
-          const tile = document.createElement('canvas');
-          tile.width = tw;
-          tile.height = th;
-          tile.getContext('2d')!.drawImage(full, -tx * tw, -ty * th);
-          this.textures.addCanvas(`terrain-${tx}-${ty}`, tile);
-        }
-      }
-    }
-    for (let ty = 0; ty < 2; ty++) {
-      for (let tx = 0; tx < 2; tx++) this.add.image(tx * Math.ceil(MAP.width / 2), ty * Math.ceil(MAP.height / 2), `terrain-${tx}-${ty}`).setOrigin(0, 0);
-    }
     this.zones = this.add.graphics();
-    for (const o of OBJECTIVES) {
-      this.add.text(o.x, o.y - 125, o.name, {
-        fontFamily: '"EB Garamond", Georgia, serif', fontSize: '34px', color: '#fffaf0', stroke: '#2a2620', strokeThickness: 6,
-      }).setOrigin(0.5);
-    }
     this.gfx = this.add.graphics();
     this.overlay = this.add.graphics();
 
@@ -107,11 +85,39 @@ export class BattleScene extends Phaser.Scene {
 
   private newBattle() {
     this.world = new World(this.seed);
+    this.buildMap();
     this.ai = new AI(1);
     this.selected.clear();
     this.pendingCallIn = null;
     this.acc = 0;
     this.paused = false;
+  }
+
+  /** Paint the battlefield generated for this battle, with its objective names. */
+  private buildMap() {
+    for (const o of this.mapLayer) o.destroy();
+    this.mapLayer = [];
+    // The painted map is split into tiles so it stays under the texture size limit of older graphics cards.
+    const full = paintTerrain();
+    const tw = Math.ceil(MAP.width / 2);
+    const th = Math.ceil(MAP.height / 2);
+    for (let ty = 0; ty < 2; ty++) {
+      for (let tx = 0; tx < 2; tx++) {
+        const key = `terrain-${tx}-${ty}`;
+        if (this.textures.exists(key)) this.textures.remove(key);
+        const tile = document.createElement('canvas');
+        tile.width = tw;
+        tile.height = th;
+        tile.getContext('2d')!.drawImage(full, -tx * tw, -ty * th);
+        this.textures.addCanvas(key, tile);
+        this.mapLayer.push(this.add.image(tx * tw, ty * th, key).setOrigin(0, 0).setDepth(-10));
+      }
+    }
+    for (const o of OBJECTIVES) {
+      this.mapLayer.push(this.add.text(o.x, o.y - 125, o.name, {
+        fontFamily: '"EB Garamond", Georgia, serif', fontSize: '34px', color: '#fffaf0', stroke: '#2a2620', strokeThickness: 6,
+      }).setOrigin(0.5).setDepth(-1));
+    }
   }
 
   /** Start zoomed out so the whole battlefield is visible. */
@@ -592,7 +598,7 @@ export class BattleScene extends Phaser.Scene {
     if (u.type === 'artillery') {
       g.fillStyle(col.symbol, alpha);
       g.fillCircle(u.x, u.y, 8);
-      if (formationOf(u) !== 'marching' && u.setup <= 0) g.lineBetween(u.x, u.y, u.x + Math.cos(u.facing) * 22, u.y + Math.sin(u.facing) * 22);
+      if (formationOf(u) === 'fortified') g.lineBetween(u.x, u.y, u.x + Math.cos(u.facing) * 22, u.y + Math.sin(u.facing) * 22);
     }
 
     // Outline: white when selected, orange when wavering, red when routing.

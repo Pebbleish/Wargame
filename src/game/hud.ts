@@ -126,7 +126,8 @@ export class Hud {
       Artillery: <kbd>B</kbd> then click to place its fire circle (or right-click an enemy) · <kbd>X</kbd> cease fire<br>
       <kbd>Space</kbd> pause · <kbd>+</kbd>/<kbd>−</kbd> speed<br>
       <kbd>WASD</kbd> or arrows pan · wheel zoom</p>
-      <p><b>Marching</b> is fastest but fights badly. <b>Formation</b> is the all-round fighting stance; long moves are marched automatically. <b>Fortified</b> barely moves, but after digging in for ${RULES.fortifyTime}s it takes much less damage and loses morale more slowly.</p>
+      <p><b>Marching</b> is fastest but fights badly; troops march automatically on any move out of combat and form up when they arrive. <b>Formation</b> is the fighting stance. <b>Fortified</b> barely moves but takes less damage and loses morale more slowly: dug in properly out of combat (${RULES.fortifyTime}s), or a weaker hasty position if already fighting. Shells hit fortified troops harder.</p>
+      <p>Artillery stops and sets up when you give it a target, and only fires once set up. Units in woods are hidden unless your troops are within ${RULES.woodsSpotRange}m; firing guns give themselves away.</p>
       <p>Call in troops from the bar at the bottom, then click inside your deployment zone (the shaded strip on the left). They march in from the map edge.</p>
       <p><button data-a="close">Got it</button></p>`;
     this.help.addEventListener('click', (e) => {
@@ -219,7 +220,7 @@ export class Hud {
   }
 
   private unitRows(u: Unit): string {
-    const order = u.state === 'routing' ? 'Routing!' : u.order.kind === 'move' ? 'Moving' : u.order.kind === 'attack' ? 'Attacking' : 'Holding';
+    const order = u.state === 'routing' ? 'Routing!' : u.order.kind === 'move' ? 'Moving' : u.order.kind === 'attack' ? (u.order.retaliate ? 'Returning fire' : 'Attacking') : u.holdPosition ? 'Holding position' : 'Idle';
     return `<div class="row"><span>${UNIT_TYPES[u.type].label}</span><span>${this.formationText(u)}</span></div>
       <div class="row"><span>Men</span><span>${Math.round(u.men).toLocaleString()} / ${u.maxMen.toLocaleString()}</span></div>
       <div class="row"><span>Morale</span><span style="color:${u.morale < RULES.waveringAt ? 'var(--bad)' : 'inherit'}">${u.morale.toFixed(0)}${u.state === 'wavering' ? ' (wavering)' : ''}</span></div>
@@ -228,8 +229,8 @@ export class Hud {
 
   private formationText(u: Unit): string {
     if (u.marching) return 'Marching (auto)';
-    if (u.formation === 'fortified' && formationOf(u) !== 'fortified') return 'Digging in…';
-    if (u.type === 'artillery' && u.setup > 0) return 'Unlimbering…';
+    if (u.formation === 'fortified' && formationOf(u) !== 'fortified') return u.type === 'artillery' ? 'Setting up guns…' : 'Digging in…';
+    if (u.formation === 'fortified' && u.hasty) return 'Fortified (hasty)';
     return FORMATION_LABEL[u.formation];
   }
 
