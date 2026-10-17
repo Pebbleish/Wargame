@@ -89,7 +89,8 @@ export class BattleScene extends Phaser.Scene {
       requisition: () => this.world.apply({ kind: 'requisition', side: PLAYER }),
       ready: () => this.world.apply({ kind: 'ready', side: PLAYER }),
       hold: () => this.world.apply({ kind: 'hold', side: PLAYER, ids: [...this.selected] }),
-      formation: () => this.world.apply({ kind: 'formation', side: PLAYER, ids: [...this.selected] }),
+      formation: (f) => this.world.apply({ kind: 'formation', side: PLAYER, ids: [...this.selected], formation: f }),
+      resign: () => this.world.apply({ kind: 'resign', side: PLAYER }),
       aim: () => { if (this.selectedGuns().length) this.aiming = true; },
       ceaseFire: () => this.world.apply({ kind: 'ceaseFire', side: PLAYER, ids: this.selectedGuns().map((u) => u.id) }),
       restart: () => {
@@ -181,6 +182,8 @@ export class BattleScene extends Phaser.Scene {
       if (k === ' ') { this.paused = !this.paused; e.preventDefault(); }
       if (k === 'h') this.world.apply({ kind: 'hold', side: PLAYER, ids: [...this.selected] });
       if (k === 'f') this.world.apply({ kind: 'formation', side: PLAYER, ids: [...this.selected] });
+      const fm = ({ '1': 'marching', '2': 'formation', '3': 'fortified' } as const)[k as '1' | '2' | '3'];
+      if (fm) this.world.apply({ kind: 'formation', side: PLAYER, ids: [...this.selected], formation: fm });
       if (k === 'b' && this.selectedGuns().length) this.aiming = true;
       if (k === 'x') this.world.apply({ kind: 'ceaseFire', side: PLAYER, ids: this.selectedGuns().map((u) => u.id) });
       if (k === '+' || k === '=') this.speedIndex = Math.min(SPEEDS.length - 1, this.speedIndex + 1);
@@ -384,6 +387,16 @@ export class BattleScene extends Phaser.Scene {
     this.zones.lineStyle(3, COLORS[1].fill, 0.35);
     this.zones.lineBetween(MAP.width - RULES.zoneDepth, 0, MAP.width - RULES.zoneDepth, MAP.height);
 
+    // The impassable border around the map.
+    const b = RULES.borderWidth;
+    this.zones.fillStyle(0x1d1b16, 0.5);
+    this.zones.fillRect(0, 0, MAP.width, b);
+    this.zones.fillRect(0, MAP.height - b, MAP.width, b);
+    this.zones.fillRect(0, b, b, MAP.height - 2 * b);
+    this.zones.fillRect(MAP.width - b, b, b, MAP.height - 2 * b);
+    this.zones.lineStyle(2, 0x1d1b16, 0.6);
+    this.zones.strokeRect(b, b, MAP.width - 2 * b, MAP.height - 2 * b);
+
     // Objectives: a ring in the owner's colour and a small flag.
     OBJECTIVES.forEach((ob, i) => {
       const owner = w.owners[i];
@@ -504,7 +517,7 @@ export class BattleScene extends Phaser.Scene {
     if (this.pendingCallIn) {
       const ok = inZone(PLAYER, this.pointerWorld);
       const type = this.pendingCallIn;
-      const fake = { type, formation: UNIT_TYPES[type].formations[0], x: this.pointerWorld.x, y: this.pointerWorld.y, facing: 0 } as Unit;
+      const fake = { type, formation: 'formation', x: this.pointerWorld.x, y: this.pointerWorld.y, facing: 0 } as Unit;
       this.blockOutline(o, fake, ok ? 0x7fd17f : 0xe0604f, 0.9);
     }
   }
@@ -579,7 +592,7 @@ export class BattleScene extends Phaser.Scene {
     if (u.type === 'artillery') {
       g.fillStyle(col.symbol, alpha);
       g.fillCircle(u.x, u.y, 8);
-      if (formationOf(u) === 'unlimbered') g.lineBetween(u.x, u.y, u.x + Math.cos(u.facing) * 22, u.y + Math.sin(u.facing) * 22);
+      if (formationOf(u) !== 'marching' && u.setup <= 0) g.lineBetween(u.x, u.y, u.x + Math.cos(u.facing) * 22, u.y + Math.sin(u.facing) * 22);
     }
 
     // Outline: white when selected, orange when wavering, red when routing.

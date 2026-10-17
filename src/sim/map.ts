@@ -157,7 +157,7 @@ export function planRoute(a: Vec, b: Vec): Vec[] {
   return [{ x: best.x, y: best.y }, b];
 }
 
-export function clampToMap(p: Vec, margin = 10): Vec {
+export function clampToMap(p: Vec, margin = 80): Vec {
   return {
     x: Math.max(margin, Math.min(MAP.width - margin, p.x)),
     y: Math.max(margin, Math.min(MAP.height - margin, p.y)),

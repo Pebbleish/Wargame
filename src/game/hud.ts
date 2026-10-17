@@ -1,15 +1,16 @@
-import { CALLIN_ORDER, RULES, UNIT_TYPES, UnitTypeId } from '../sim/config';
-import { Unit, World } from '../sim/world';
+import { CALLIN_ORDER, Formation, RULES, UNIT_TYPES, UnitTypeId } from '../sim/config';
+import { Unit, World, formationOf } from '../sim/world';
 
 export interface HudHandlers {
   callIn(type: UnitTypeId): void;
   requisition(): void;
   ready(): void;
   hold(): void;
-  formation(): void;
+  formation(f?: Formation): void;
   aim(): void;
   ceaseFire(): void;
   restart(): void;
+  resign(): void;
   pause(): void;
   speed(delta: number): void;
 }
@@ -42,8 +43,8 @@ function setHtml(e: HTMLElement, html: string) {
   e.innerHTML = html;
 }
 
-const FORMATION_LABEL: Record<string, string> = {
-  line: 'Line', column: 'Column', square: 'Square', skirmish: 'Skirmish', limbered: 'Limbered', unlimbered: 'Deployed',
+const FORMATION_LABEL: Record<Formation, string> = {
+  marching: 'Marching', formation: 'Formation', fortified: 'Fortified',
 };
 
 /** The heads-up display, built from plain HTML over the game canvas. */
@@ -95,13 +96,24 @@ export class Hud {
     this.queue.id = 'queue';
     bar.appendChild(this.queue);
 
-    this.controls.innerHTML = `<button data-a="pause">Pause</button><button data-a="slower">−</button><span class="spd" style="align-self:center;min-width:28px;text-align:center">1×</span><button data-a="faster">+</button><button data-a="help">?</button>`;
+    this.controls.innerHTML = `<button data-a="pause">Pause</button><button data-a="slower">−</button><span class="spd" style="align-self:center;min-width:28px;text-align:center">1×</span><button data-a="faster">+</button><button data-a="help">?</button><button data-a="resign">Resign</button>`;
     this.controls.addEventListener('click', (e) => {
       const a = (e.target as HTMLElement).dataset.a;
       if (a === 'pause') this.h.pause();
       if (a === 'slower') this.h.speed(-1);
       if (a === 'faster') this.h.speed(1);
       if (a === 'help') this.help.style.display = this.help.style.display === 'none' ? 'block' : 'none';
+      if (a === 'resign') {
+        // Two clicks to resign, so a stray click never ends the battle.
+        const b = e.target as HTMLButtonElement;
+        if (b.dataset.confirm === '1') {
+          this.h.resign();
+          return;
+        }
+        b.dataset.confirm = '1';
+        b.textContent = 'Confirm resign?';
+        window.setTimeout(() => { b.dataset.confirm = ''; b.textContent = 'Resign'; }, 3000);
+      }
     });
 
     this.help.innerHTML = `
@@ -110,10 +122,11 @@ export class Hud {
       <p><kbd>Left-click</kbd> select · <kbd>drag</kbd> box select · <kbd>Shift</kbd> add<br>
       <kbd>Right-click</kbd> move, or attack an enemy<br>
       <kbd>Right-drag</kbd> form a line along the drag<br>
-      <kbd>F</kbd> change formation · <kbd>H</kbd> hold<br>
+      <kbd>F</kbd> cycle formation, or <kbd>1</kbd> march · <kbd>2</kbd> formation · <kbd>3</kbd> fortify · <kbd>H</kbd> hold<br>
       Artillery: <kbd>B</kbd> then click to place its fire circle (or right-click an enemy) · <kbd>X</kbd> cease fire<br>
       <kbd>Space</kbd> pause · <kbd>+</kbd>/<kbd>−</kbd> speed<br>
       <kbd>WASD</kbd> or arrows pan · wheel zoom</p>
+      <p><b>Marching</b> is fastest but fights badly. <b>Formation</b> is the all-round fighting stance; long moves are marched automatically. <b>Fortified</b> barely moves, but after digging in for ${RULES.fortifyTime}s it takes much less damage and loses morale more slowly.</p>
       <p>Call in troops from the bar at the bottom, then click inside your deployment zone (the shaded strip on the left). They march in from the map edge.</p>
       <p><button data-a="close">Got it</button></p>`;
     this.help.addEventListener('click', (e) => {
@@ -122,7 +135,7 @@ export class Hud {
 
     this.economy.innerHTML = `<span class="mp"></span><button data-a="req" title="+${RULES.requisitionAmount} manpower once, costs ${RULES.requisitionMoraleCost} army morale">Requisition</button><span class="cap" style="color:var(--muted)"></span>`;
     this.deploy.innerHTML = `<div class="h">Deploy your army</div><div style="margin:4px 0 8px;color:var(--muted)">Right-click to reposition regiments inside your zone. Spend your budget on extra troops.</div><button data-a="ready">Start battle</button>`;
-    this.selection.innerHTML = `<div class="info"></div><div class="btns"><button data-a="hold">Hold (H)</button><button data-a="formation">Formation (F)</button></div><div class="btns guns"><button data-a="aim">Aim fire (B)</button><button data-a="cease">Cease fire (X)</button></div>`;
+    this.selection.innerHTML = `<div class="info"></div><div class="btns"><button data-a="hold">Hold (H)</button></div><div class="btns fm"><button data-a="fm-marching">March (1)</button><button data-a="fm-formation">Formation (2)</button><button data-a="fm-fortified">Fortify (3)</button></div><div class="btns guns"><button data-a="aim">Aim fire (B)</button><button data-a="cease">Cease fire (X)</button></div>`;
     this.economy.addEventListener('click', (e) => {
       if ((e.target as HTMLElement).dataset.a === 'req') this.h.requisition();
     });
@@ -132,7 +145,7 @@ export class Hud {
     this.selection.addEventListener('click', (e) => {
       const a = (e.target as HTMLElement).dataset.a;
       if (a === 'hold') this.h.hold();
-      if (a === 'formation') this.h.formation();
+      if (a?.startsWith('fm-')) this.h.formation(a.slice(3) as Formation);
       if (a === 'aim') this.h.aim();
       if (a === 'cease') this.h.ceaseFire();
     });
@@ -190,6 +203,9 @@ export class Hud {
       return;
     }
     this.selection.style.display = 'block';
+    for (const f of ['marching', 'formation', 'fortified'] as Formation[]) {
+      (this.selection.querySelector(`[data-a="fm-${f}"]`) as HTMLElement).classList.toggle('on', sel.every((u) => u.formation === f));
+    }
     (this.selection.querySelector('.guns') as HTMLElement).style.display = sel.some((u) => u.type === 'artillery') ? 'flex' : 'none';
     const info = this.selection.querySelector('.info') as HTMLElement;
     if (sel.length === 1) {
@@ -204,10 +220,17 @@ export class Hud {
 
   private unitRows(u: Unit): string {
     const order = u.state === 'routing' ? 'Routing!' : u.order.kind === 'move' ? 'Moving' : u.order.kind === 'attack' ? 'Attacking' : 'Holding';
-    return `<div class="row"><span>${UNIT_TYPES[u.type].label}</span><span>${u.marching ? 'Marching in column' : FORMATION_LABEL[u.formation]}</span></div>
+    return `<div class="row"><span>${UNIT_TYPES[u.type].label}</span><span>${this.formationText(u)}</span></div>
       <div class="row"><span>Men</span><span>${Math.round(u.men).toLocaleString()} / ${u.maxMen.toLocaleString()}</span></div>
       <div class="row"><span>Morale</span><span style="color:${u.morale < RULES.waveringAt ? 'var(--bad)' : 'inherit'}">${u.morale.toFixed(0)}${u.state === 'wavering' ? ' (wavering)' : ''}</span></div>
       <div class="row"><span>Order</span><span>${order}</span></div>`;
+  }
+
+  private formationText(u: Unit): string {
+    if (u.marching) return 'Marching (auto)';
+    if (u.formation === 'fortified' && formationOf(u) !== 'fortified') return 'Digging in…';
+    if (u.type === 'artillery' && u.setup > 0) return 'Unlimbering…';
+    return FORMATION_LABEL[u.formation];
   }
 
   showTooltip(u: Unit | null, x: number, y: number) {

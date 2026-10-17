@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { RULES } from '../src/sim/config';
+import { MAP, RULES } from '../src/sim/config';
 import { AI } from '../src/sim/ai';
 import { World } from '../src/sim/world';
 
@@ -36,5 +36,22 @@ describe('battle simulation', () => {
   it('never exceeds the field cap', () => {
     const w = playOut(3);
     for (const side of [0, 1] as const) expect(w.fieldCount(side)).toBeLessThanOrEqual(RULES.fieldCap);
+  });
+
+  it('keeps every unit inside the border', () => {
+    const w = playOut(5);
+    for (const u of w.units) {
+      expect(u.x).toBeGreaterThanOrEqual(RULES.borderWidth);
+      expect(u.x).toBeLessThanOrEqual(MAP.width - RULES.borderWidth);
+      expect(u.y).toBeGreaterThanOrEqual(RULES.borderWidth);
+      expect(u.y).toBeLessThanOrEqual(MAP.height - RULES.borderWidth);
+    }
+  });
+
+  it('ends the battle when a side resigns', () => {
+    const w = new World(1);
+    w.apply({ kind: 'resign', side: 0 });
+    expect(w.phase).toBe('ended');
+    expect(w.result?.winner).toBe(1);
   });
 });

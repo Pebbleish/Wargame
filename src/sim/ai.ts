@@ -1,6 +1,6 @@
 import { MAP, RULES, UNIT_TYPES, UnitTypeId } from './config';
 import { OBJECTIVES, Vec, dist } from './map';
-import { Command, Side, Unit, World } from './world';
+import { Command, Side, Unit, World, formationOf } from './world';
 
 /**
  * A simple layered AI: it decides which objectives each regiment should go for,
@@ -76,7 +76,7 @@ export class AI {
 
       if (u.type === 'cavalry') {
         const prey = visibleEnemies
-          .filter((e) => dist(u, e) < 800 && e.formation !== 'square' && (e.state !== 'ok' || e.type === 'artillery' || e.type === 'light'))
+          .filter((e) => dist(u, e) < 800 && formationOf(e) !== 'fortified' && (e.state !== 'ok' || e.type === 'artillery' || e.type === 'light'))
           .sort((a, b) => dist(u, a) - dist(u, b))[0];
         if (prey) {
           if (u.order.kind !== 'attack' || u.order.target !== prey.id) cmds.push({ kind: 'attack', side: this.side, ids: [u.id], target: prey.id });
@@ -97,18 +97,15 @@ export class AI {
       const goal = assigned.get(u.id)!;
       const enemyWeak = nearest && nd < 380 && (nearest.state !== 'ok' || (u.morale > 65 && nearest.morale < u.morale - 20));
       if (u.type === 'line' && enemyWeak && nearest) {
-        if (u.formation !== 'line') cmds.push({ kind: 'formation', side: this.side, ids: [u.id], formation: 'line' });
+        if (u.formation !== 'formation') cmds.push({ kind: 'formation', side: this.side, ids: [u.id], formation: 'formation' });
         if (u.order.kind !== 'attack') cmds.push({ kind: 'attack', side: this.side, ids: [u.id], target: nearest.id });
         continue;
       }
-      if (u.type === 'line') {
-        const cavThreat = visibleEnemies.some((e) => e.type === 'cavalry' && e.state === 'ok' && dist(e, u) < 250);
-        const wanted = cavThreat ? 'square' : nd > 700 && dist(u, goal) > 600 ? 'column' : 'line';
-        if (u.formation !== wanted) cmds.push({ kind: 'formation', side: this.side, ids: [u.id], formation: wanted });
-      }
-      if (u.type === 'light' && u.formation !== 'skirmish' && nd < 900) {
-        cmds.push({ kind: 'formation', side: this.side, ids: [u.id], formation: 'skirmish' });
-      }
+      // Dig in when holding an objective under threat, otherwise stay in formation and let long moves march.
+      const atGoal = dist(u, goal) < 250;
+      const cavThreat = visibleEnemies.some((e) => e.type === 'cavalry' && e.state === 'ok' && dist(e, u) < 300);
+      const wanted = atGoal && (nd < 700 || cavThreat) ? 'fortified' : 'formation';
+      if (u.formation !== wanted) cmds.push({ kind: 'formation', side: this.side, ids: [u.id], formation: wanted });
       // Spread regiments around the objective, mirrored so both sides behave the same way.
       const n = this.slot(u.id);
       const spot = { x: goal.x + this.dir() * (((n * 37) % 160) - 120), y: goal.y + this.dir() * (((n * 53) % 200) - 100) };

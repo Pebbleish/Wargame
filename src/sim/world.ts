@@ -1,5 +1,5 @@
 import {
-  CAVALRY_SIZE, FORMATION, Formation, MAP, RULES, UNIT_TYPES, UnitTypeId,
+  CAVALRY_FORMATION_SPEED, FORMATION, FORMATIONS, Formation, MAP, RULES, UNIT_SIZE, UNIT_TYPES, UnitTypeId,
 } from './config';
 import {
   OBJECTIVES, Vec, clampToMap, crossesRiver, dist, nearCrossing, planRoute, terrainAt,
@@ -30,13 +30,15 @@ export interface Unit {
   waypoints: Vec[];
   state: UnitState;
   routs: number;
-  limberTimer: number;
+  setup: number; // artillery: seconds until it can fire after marching
+  digIn: number; // seconds until a fortifying unit is dug in
+  edgeTime: number; // seconds a shaken unit has spent pinned against the map border
   underFire: number; // seconds of "recently hit" left
   firedAt: number; // battle time of last volley, for smoke
   meleeWith: number | null;
   charged: number[]; // targets this cavalry unit already hit with a charge
   moving: boolean;
-  marching: boolean; // temporarily in column for a long march, back to its formation on arrival
+  marching: boolean; // temporarily marching for a long move, back to formation on arrival
   seen: [boolean, boolean]; // seen[side] = visible to that side
   group: number; // regiments ordered together march at the pace of the slowest
   prev: { x: number; y: number; facing: number }; // position at the start of the tick, for smooth drawing
@@ -89,7 +91,8 @@ export type Command =
   | { kind: 'formation'; side: Side; ids: number[]; formation?: Formation }
   | { kind: 'callIn'; side: Side; type: UnitTypeId; x: number; y: number }
   | { kind: 'requisition'; side: Side }
-  | { kind: 'ready'; side: Side };
+  | { kind: 'ready'; side: Side }
+  | { kind: 'resign'; side: Side };
 
 export interface Result {
   winner: Side | -1;
@@ -119,17 +122,20 @@ export function angleDiff(a: number, b: number): number {
   return d;
 }
 
-/** The formation a unit is actually in right now: long marches are made in column automatically. */
-export function formationOf(u: Pick<Unit, 'formation'> & { marching?: boolean }): Formation {
-  return u.marching ? 'column' : u.formation;
+type FormationView = Pick<Unit, 'formation'> & { marching?: boolean; digIn?: number };
+
+/** The formation a unit is effectively in: long moves are marched, and fortifying takes time. */
+export function formationOf(u: FormationView): Formation {
+  if (u.marching) return 'marching';
+  if (u.formation === 'fortified' && (u.digIn ?? 0) > 0) return 'formation';
+  return u.formation;
 }
 
-export function unitSize(u: Pick<Unit, 'type' | 'formation'> & { marching?: boolean }): { w: number; d: number } {
-  if (u.type === 'cavalry') return CAVALRY_SIZE;
-  return FORMATION[formationOf(u)];
+export function unitSize(u: Pick<Unit, 'type'> & FormationView): { w: number; d: number } {
+  return UNIT_SIZE[u.type][u.marching ? 'marching' : u.formation];
 }
 
-export function unitRadius(u: Pick<Unit, 'type' | 'formation'> & { marching?: boolean }): number {
+export function unitRadius(u: Pick<Unit, 'type'> & FormationView): number {
   const s = unitSize(u);
   return (s.w + s.d) / 4;
 }
@@ -213,12 +219,14 @@ export class World {
       men: def.men,
       maxMen: def.men,
       morale: 100,
-      formation: def.formations[0] === 'limbered' ? 'unlimbered' : def.formations[0],
+      formation: 'formation',
       order: { kind: 'hold' },
       waypoints: [],
       state: 'ok',
       routs: 0,
-      limberTimer: 0,
+      setup: 0,
+      digIn: 0,
+      edgeTime: 0,
       underFire: 0,
       firedAt: -99,
       meleeWith: null,
@@ -343,12 +351,12 @@ export class World {
         for (const id of cmd.ids) {
           const u = own(id);
           if (!u) continue;
-          const options: Formation[] = UNIT_TYPES[u.type].formations.filter((f) => f !== 'limbered' && f !== 'unlimbered');
-          if (options.length < 2) continue;
-          const next = cmd.formation && options.includes(cmd.formation)
-            ? cmd.formation
-            : options[(options.indexOf(u.formation) + 1) % options.length];
+          const next = cmd.formation ?? FORMATIONS[(FORMATIONS.indexOf(u.formation) + 1) % FORMATIONS.length];
+          if (next === u.formation) continue;
+          if (next === 'fortified') u.digIn = RULES.fortifyTime;
+          if (u.type === 'artillery' && formationOf(u) === 'marching' && next !== 'marching') u.setup = RULES.limberTime;
           u.formation = next;
+          u.marching = false;
         }
         break;
       }
@@ -382,6 +390,10 @@ export class World {
         if (this.sides[0].ready && this.sides[1].ready) this.startBattle();
         break;
       }
+      case 'resign': {
+        this.end(cmd.side === 0 ? 1 : 0, `${this.sides[cmd.side].nation} has resigned`);
+        break;
+      }
     }
   }
 
@@ -403,6 +415,11 @@ export class World {
     this.time += DT;
     for (const u of this.units) u.prev = { x: u.x, y: u.y, facing: u.facing };
     this.impacts = this.impacts.filter((i) => this.time - i.t < 3);
+    // Process regiments in a fresh random order each tick so neither side gets to act first.
+    for (let i = this.units.length - 1; i > 0; i--) {
+      const j = Math.floor(this.rng.next() * (i + 1));
+      [this.units[i], this.units[j]] = [this.units[j], this.units[i]];
+    }
     this.updateGroupSpeeds();
     this.updateVisibility();
     this.economy();
@@ -410,6 +427,7 @@ export class World {
     for (const u of this.units) this.updateUnit(u);
     this.resolveMelee();
     this.separate();
+    this.keepOnMap();
     this.cleanup();
     this.objectives();
     this.armyMorale();
@@ -471,8 +489,6 @@ export class World {
       s.queue = s.queue.filter((c) => c.readyAt > this.time);
       for (const c of due) {
         const u = this.spawn(c.side, c.type, c.side === 0 ? 15 : MAP.width - 15, c.y);
-        if (u.type === 'line' || u.type === 'engineers') u.formation = 'column';
-        if (u.type === 'artillery') u.formation = 'limbered';
         u.order = { kind: 'move', x: c.x, y: c.y };
         u.waypoints = [{ x: c.x, y: c.y }];
         this.log(c.side, `${u.name} arrives`);
@@ -483,7 +499,8 @@ export class World {
   /** Speed on open ground, before terrain and keeping pace with the group. */
   private baseSpeed(u: Unit): number {
     const def = UNIT_TYPES[u.type];
-    const fm = u.type === 'cavalry' ? 1 : FORMATION[formationOf(u)].speed;
+    const f = formationOf(u);
+    const fm = u.type === 'cavalry' && f === 'formation' ? CAVALRY_FORMATION_SPEED : FORMATION[f].speed;
     let s = def.speed * RULES.moveSpeedScale * fm;
     if (u.state === 'wavering') s *= 0.7;
     return s;
@@ -499,7 +516,8 @@ export class World {
 
   private turnRate(u: Unit): number {
     if (u.type === 'cavalry') return 4.5;
-    if (formationOf(u) === 'line') return 1.5;
+    if (formationOf(u) === 'fortified') return 1;
+    if (u.type === 'line' && formationOf(u) === 'formation') return 1.5;
     return 3;
   }
 
@@ -537,35 +555,27 @@ export class World {
       }
     }
 
-    // Artillery has to limber before it moves and unlimber before it fires.
-    if (u.type === 'artillery') {
-      const wantsMove = goal !== null;
-      if (wantsMove && u.formation === 'unlimbered') {
-        u.limberTimer += DT;
-        if (u.limberTimer >= RULES.limberTime) { u.formation = 'limbered'; u.limberTimer = 0; }
-        goal = null;
-      } else if (!wantsMove && u.formation === 'limbered') {
-        u.limberTimer += DT;
-        if (u.limberTimer >= RULES.limberTime) { u.formation = 'unlimbered'; u.limberTimer = 0; }
-      } else {
-        u.limberTimer = 0;
-      }
-    }
-
+    u.digIn = Math.max(0, u.digIn - DT);
+    u.setup = Math.max(0, u.setup - DT);
+    const wasMarching = formationOf(u) === 'marching';
     u.marching = this.shouldMarch(u, goal, enemies);
+    // Guns coming off the march have to unlimber before they can fire.
+    if (u.type === 'artillery' && wasMarching && formationOf(u) !== 'marching') u.setup = RULES.limberTime;
     u.moving = false;
     if (goal && u.meleeWith === null) this.moveToward(u, goal, enemies, target);
+    // Leaving prepared positions means digging in again at the next stop.
+    if (u.moving && u.formation === 'fortified') u.digIn = RULES.fortifyTime;
 
     if (u.type === 'artillery') this.bombard(u);
     else if (!u.moving && u.meleeWith === null) this.fire(u, enemies, target);
-    else if (u.type === 'light' && u.formation === 'skirmish' && u.meleeWith === null) this.fire(u, enemies, target, 0.5);
+    else if (u.type === 'light' && formationOf(u) === 'formation' && u.meleeWith === null) this.fire(u, enemies, target, 0.5);
 
     this.updateMorale(u, enemies);
   }
 
   private shouldMarch(u: Unit, goal: Vec | null, enemies: Unit[]): boolean {
-    if (!goal || u.order.kind !== 'move' || u.formation === 'column' || u.meleeWith !== null) return false;
-    if (u.type !== 'line' && u.type !== 'light' && u.type !== 'engineers') return false;
+    // Only units in formation switch to marching on their own; fortified units stay dug in.
+    if (!goal || u.order.kind !== 'move' || u.formation !== 'formation' || u.meleeWith !== null) return false;
     const final = u.waypoints[u.waypoints.length - 1] ?? goal;
     const enemyNear = enemies.some((e) => e.seen[u.side] && e.state !== 'routing' && dist(e, u) < 700);
     return !enemyNear && dist(u, final) > 250 + (u.marching ? 0 : 100);
@@ -626,7 +636,7 @@ export class World {
   private bombard(u: Unit) {
     u.reload = Math.max(0, u.reload - DT);
     const zone = u.fireZone;
-    if (!zone || u.formation !== 'unlimbered' || u.moving || u.meleeWith !== null) return;
+    if (!zone || formationOf(u) === 'marching' || u.setup > 0 || u.moving || u.meleeWith !== null) return;
     const range = UNIT_TYPES.artillery.range * (terrainAt(u).hill ? 1.2 : 1);
     if (dist(u, zone) > range) return;
     u.facing = this.turnToward(u, Math.atan2(zone.y - u.y, zone.x - u.x));
@@ -642,19 +652,26 @@ export class World {
       const d = dist(t, hit) - unitRadius(t) * 0.6;
       if (d > RULES.shellBlast) continue;
       const falloff = 1 - Math.max(0, d) / RULES.shellBlast;
-      const taken = t.type === 'cavalry' ? 1.1 : FORMATION[formationOf(t)].fireTaken;
+      const taken = this.fireTaken(t);
       const cas = RULES.shellDamage * strength * falloff * taken * terrainAt(t).cover * this.rng.range(0.7, 1.3);
       this.damage(t, cas, u, 3.5);
     }
   }
 
+  private fireTaken(t: Unit): number {
+    const f = formationOf(t);
+    let taken = FORMATION[f].fireTaken;
+    if (t.type === 'cavalry') taken *= 1.1;
+    if (t.type === 'light' && f !== 'marching') taken *= 0.6; // skirmishers are spread out
+    return taken;
+  }
+
   private flankMultiplier(attacker: Vec, target: Unit): number {
     const toAttacker = Math.atan2(attacker.y - target.y, attacker.x - target.x);
     const off = Math.abs(angleDiff(target.facing, toAttacker));
-    if (target.formation === 'square') return 1;
-    if (off < Math.PI / 3) return 1;
-    if (off < (2 * Math.PI) / 3) return 2;
-    return 3;
+    const flank = off < Math.PI / 3 ? 1 : off < (2 * Math.PI) / 3 ? 2 : 3;
+    // Dug-in troops have prepared positions all round, so flanking them matters less.
+    return formationOf(target) === 'fortified' ? Math.min(flank, 1.5) : flank;
   }
 
   private damage(target: Unit, casualties: number, from: Vec, moraleWeight: number) {
@@ -662,14 +679,13 @@ export class World {
     target.men -= lost;
     this.sides[target.side].lostMen += lost;
     const flank = this.flankMultiplier(from, target);
-    target.morale -= (lost / target.maxMen) * 100 * moraleWeight * flank;
+    target.morale -= (lost / target.maxMen) * 100 * moraleWeight * flank * FORMATION[formationOf(target)].moraleTaken;
     target.underFire = 2;
   }
 
   private fire(u: Unit, enemies: Unit[], ordered?: Unit, scale = 1) {
     const def = UNIT_TYPES[u.type];
     if (def.range <= 0 || u.state === 'routing') return;
-    if (u.type === 'artillery' && u.formation !== 'unlimbered') return;
     const fm = FORMATION[formationOf(u)].fire;
     if (fm <= 0) return;
     const range = def.range * (terrainAt(u).hill ? 1.2 : 1);
@@ -697,7 +713,7 @@ export class World {
     const rangeMod = 1 - 0.7 * (bestD / range);
     const waver = u.state === 'wavering' ? 0.6 : 1;
     const t = terrainAt(best);
-    const taken = best.type === 'cavalry' ? 1.1 : FORMATION[formationOf(best)].fireTaken;
+    const taken = this.fireTaken(best);
     const cas = u.men * fm * def.lethality * rangeMod * waver * t.cover * taken * scale * this.rng.range(0.8, 1.2) * DT;
     this.damage(best, cas, u, u.type === 'artillery' ? 3.2 : 2.6);
     u.firedAt = this.time;
@@ -713,7 +729,7 @@ export class World {
       const impact = (22 * flank) / vs;
       e.morale -= impact;
       this.damage(e, e.men * 0.03 * (flank / vs), u, 1);
-      if (e.formation === 'square') this.damage(u, u.men * 0.08, e, 2);
+      if (e.type !== 'cavalry' && formationOf(e) === 'fortified') this.damage(u, u.men * 0.08, e, 2);
     }
   }
 
@@ -744,7 +760,7 @@ export class World {
 
   private updateMorale(u: Unit, enemies: Unit[]) {
     const nearbyRouting = this.units.some((o) => o.side === u.side && o !== u && o.state === 'routing' && dist(o, u) < 250);
-    if (nearbyRouting) u.morale -= 1.2 * DT;
+    if (nearbyRouting) u.morale -= 1.2 * DT * FORMATION[formationOf(u)].moraleTaken;
     if (u.underFire <= 0 && u.meleeWith === null) {
       u.morale = Math.min(100, u.morale + RULES.moraleRecovery * DT);
     }
@@ -810,15 +826,27 @@ export class World {
     }
   }
 
+  /** Nobody can leave the map. Shaken units stuck against the border for too long melt away. */
+  private keepOnMap() {
+    for (const u of this.units) {
+      const m = RULES.borderWidth + unitRadius(u);
+      u.x = Math.max(m, Math.min(MAP.width - m, u.x));
+      u.y = Math.max(m, Math.min(MAP.height - m, u.y));
+      const nearEdge = u.x <= m + 60 || u.x >= MAP.width - m - 60 || u.y <= m + 60 || u.y >= MAP.height - m - 60;
+      if (nearEdge && u.state !== 'ok') u.edgeTime += DT;
+      else u.edgeTime = Math.max(0, u.edgeTime - DT * 2);
+    }
+  }
+
   private cleanup() {
     const keep: Unit[] = [];
     for (const u of this.units) {
-      const atEdge = u.state === 'routing' && (u.side === 0 ? u.x <= 5 : u.x >= MAP.width - 5);
+      const atEdge = u.edgeTime >= RULES.edgeDisperseTime;
       const spent = u.men < u.maxMen * 0.15;
       if (atEdge || spent) {
         this.sides[u.side].removed += 1;
         this.sides[1 - u.side].score += 2;
-        this.log(u.side, spent ? `${u.name} has been destroyed` : `${u.name} has fled the field`);
+        this.log(u.side, spent ? `${u.name} has been destroyed` : `${u.name} has deserted the field`);
         for (const o of this.units) if (o.meleeWith === u.id) o.meleeWith = null;
         continue;
       }

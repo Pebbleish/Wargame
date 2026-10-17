@@ -33,6 +33,7 @@
       button { font: inherit; cursor: pointer; border: 1px solid var(--edge); background: #fffaf0; color: var(--ink); border-radius: 4px; padding: 4px 10px; }
       button:hover:not(:disabled) { background: #fff3cf; }
       button:disabled { opacity: 0.5; cursor: default; }
+      button.on { background: #2b2e38; color: #f5f2ea; }
 
       #top { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 16px; padding: 6px 14px; white-space: nowrap; }
       .army { display: flex; flex-direction: column; gap: 3px; min-width: 150px; }
@@ -57,10 +58,11 @@
       .card .why { font-size: 10px; color: var(--bad); min-height: 12px; }
       #queue { display: flex; flex-direction: column; justify-content: center; gap: 2px; padding: 0 6px; min-width: 120px; font-size: 11px; color: var(--muted); }
 
-      #selection { position: absolute; bottom: 8px; left: 8px; width: 250px; padding: 8px 10px; display: none; }
+      #selection { position: absolute; bottom: 8px; left: 8px; width: 290px; padding: 8px 10px; display: none; }
       #selection .n { font-family: 'EB Garamond', Georgia, serif; font-weight: 700; font-size: 17px; }
       #selection .row { display: flex; justify-content: space-between; color: var(--muted); }
       #selection .btns { display: flex; gap: 6px; margin-top: 6px; }
+      #selection .fm button { flex: 1; padding: 4px 4px; font-size: 12px; }
 
       #controls { position: absolute; top: 8px; right: 8px; display: flex; gap: 6px; padding: 6px; }
       #help { position: absolute; top: 56px; right: 8px; width: 300px; padding: 10px 14px; line-height: 1.5; }
