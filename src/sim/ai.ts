@@ -10,6 +10,7 @@ export class AI {
   private lastThink = -999;
   private calls = 0;
   private slots = new Map<number, number>();
+  private lastAim = new Map<number, number>();
 
   constructor(private side: Side) {}
 
@@ -26,7 +27,7 @@ export class AI {
 
   private deploy(world: World): Command[] {
     if (world.sides[this.side].ready) return [];
-    const buys: [UnitTypeId, number][] = [['line', 800], ['line', 1200], ['artillery', 1000]];
+    const buys: [UnitTypeId, number][] = [['line', 1200], ['line', 1800], ['artillery', 1500]];
     const cmds: Command[] = buys.map(([type, y]) => ({
       kind: 'callIn', side: this.side, type, x: this.homeX(type === 'artillery' ? 200 : 320), y: this.side === 0 ? y : MAP.height - y,
     }));
@@ -88,7 +89,8 @@ export class AI {
 
       if (u.type === 'artillery') {
         const anchor = this.frontAnchor(mine);
-        this.moveIfFar(cmds, u, { x: anchor.x - this.dir() * 350, y: anchor.y }, 120);
+        this.moveIfFar(cmds, u, { x: anchor.x - this.dir() * 450, y: anchor.y }, 150);
+        this.aimGuns(world, cmds, u, mine, visibleEnemies);
         continue;
       }
 
@@ -114,6 +116,26 @@ export class AI {
       this.moveIfFar(cmds, u, spot, 90);
     }
     return cmds;
+  }
+
+  /** Re-aim a battery's fire circle at the densest enemy group in range, away from our own troops. */
+  private aimGuns(world: World, cmds: Command[], u: Unit, mine: Unit[], enemies: Unit[]) {
+    if ((this.lastAim.get(u.id) ?? -99) > world.time - 6) return;
+    let best: Unit | undefined;
+    let bestScore = 0;
+    for (const e of enemies) {
+      if (e.state === 'routing' || dist(u, e) > UNIT_TYPES.artillery.range * 0.95) continue;
+      const crowd = enemies.filter((o) => o.state !== 'routing' && dist(o, e) < 200).length;
+      const friends = mine.filter((o) => dist(o, e) < 200).length;
+      const score = crowd - friends * 3;
+      if (score > bestScore) { bestScore = score; best = e; }
+    }
+    this.lastAim.set(u.id, world.time);
+    if (!best) {
+      if (u.fireZone) cmds.push({ kind: 'ceaseFire', side: this.side, ids: [u.id] });
+      return;
+    }
+    if (!u.fireZone || dist(u.fireZone, best) > 60) cmds.push({ kind: 'bombard', side: this.side, ids: [u.id], x: best.x, y: best.y });
   }
 
   private reinforce(world: World): Command[] {

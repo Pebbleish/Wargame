@@ -38,6 +38,16 @@ export interface Unit {
   moving: boolean;
   marching: boolean; // temporarily in column for a long march, back to its formation on arrival
   seen: [boolean, boolean]; // seen[side] = visible to that side
+  group: number; // regiments ordered together march at the pace of the slowest
+  prev: { x: number; y: number; facing: number }; // position at the start of the tick, for smooth drawing
+  fireZone: Vec | null; // artillery: the area it is bombarding
+  reload: number; // artillery: seconds until the next shell
+}
+
+export interface Impact {
+  x: number;
+  y: number;
+  t: number;
 }
 
 export interface CallIn {
@@ -73,6 +83,8 @@ export interface GameEvent {
 export type Command =
   | { kind: 'move'; side: Side; moves: { id: number; x: number; y: number }[]; facing?: number }
   | { kind: 'attack'; side: Side; ids: number[]; target: number }
+  | { kind: 'bombard'; side: Side; ids: number[]; x: number; y: number }
+  | { kind: 'ceaseFire'; side: Side; ids: number[] }
   | { kind: 'hold'; side: Side; ids: number[] }
   | { kind: 'formation'; side: Side; ids: number[]; formation?: Formation }
   | { kind: 'callIn'; side: Side; type: UnitTypeId; x: number; y: number }
@@ -159,8 +171,11 @@ export class World {
   owners: (Side | -1)[] = OBJECTIVES.map(() => -1);
   events: GameEvent[] = [];
   result: Result | null = null;
+  impacts: Impact[] = [];
   rng: Rng;
   private nextId = 1;
+  private nextGroup = 1;
+  private groupSpeed = new Map<number, number>();
 
   constructor(seed = 1, nations: [string, string] = ['Valdmark', 'Ostmark']) {
     this.rng = new Rng(seed);
@@ -172,7 +187,7 @@ export class World {
 
   private placeCore(side: Side) {
     const core: UnitTypeId[] = ['line', 'line', 'light', 'line', 'line', 'line', 'cavalry', 'artillery'];
-    const ys = [400, 650, 850, 1000, 1150, 1350, 1700, 1000];
+    const ys = [600, 975, 1275, 1500, 1725, 2025, 2550, 1500];
     const xs = [300, 300, 340, 320, 300, 300, 200, 150];
     core.forEach((type, i) => {
       const x = side === 0 ? xs[i] : MAP.width - xs[i];
@@ -211,6 +226,10 @@ export class World {
       moving: false,
       marching: false,
       seen: [side === 0, side === 1],
+      group: 0,
+      prev: { x, y, facing: side === 0 ? 0 : Math.PI },
+      fireZone: null,
+      reload: 0,
     };
     s.fieldedMen += def.men;
     this.units.push(unit);
@@ -242,6 +261,11 @@ export class World {
       if (s.cooldowns[type] > this.time) return 'Cooling down';
       if (s.queue.length >= RULES.queueLimit) return 'Queue full';
     }
+    if (type === 'artillery') {
+      const guns = this.units.filter((u) => u.side === side && u.type === 'artillery').length
+        + s.queue.filter((c) => c.type === 'artillery').length;
+      if (guns >= RULES.artilleryCap) return `Limit of ${RULES.artilleryCap} batteries`;
+    }
     if (s.manpower < def.cost) return 'Not enough manpower';
     if (this.fieldCount(side) >= RULES.fieldCap) return 'Army at full size';
     return null;
@@ -255,6 +279,7 @@ export class World {
     };
     switch (cmd.kind) {
       case 'move': {
+        const group = cmd.moves.length > 1 ? this.nextGroup++ : 0;
         for (const m of cmd.moves) {
           const u = own(m.id);
           if (!u) continue;
@@ -269,6 +294,7 @@ export class World {
           u.order = { kind: 'move', x: p.x, y: p.y, facing: cmd.facing };
           u.waypoints = planRoute(u, p);
           u.meleeWith = null;
+          u.group = group;
         }
         break;
       }
@@ -278,8 +304,29 @@ export class World {
         for (const id of cmd.ids) {
           const u = own(id);
           if (!u) continue;
+          if (u.type === 'artillery') {
+            // Guns never charge: attacking with artillery means shelling where the target stands.
+            u.fireZone = { x: target.x, y: target.y };
+            continue;
+          }
           u.order = { kind: 'attack', target: target.id };
           u.waypoints = planRoute(u, target);
+          u.group = 0;
+        }
+        break;
+      }
+      case 'bombard': {
+        if (this.phase !== 'battle') break;
+        for (const id of cmd.ids) {
+          const u = own(id);
+          if (u?.type === 'artillery') u.fireZone = clampToMap({ x: cmd.x, y: cmd.y });
+        }
+        break;
+      }
+      case 'ceaseFire': {
+        for (const id of cmd.ids) {
+          const u = own(id);
+          if (u) u.fireZone = null;
         }
         break;
       }
@@ -354,6 +401,9 @@ export class World {
       return;
     }
     this.time += DT;
+    for (const u of this.units) u.prev = { x: u.x, y: u.y, facing: u.facing };
+    this.impacts = this.impacts.filter((i) => this.time - i.t < 3);
+    this.updateGroupSpeeds();
     this.updateVisibility();
     this.economy();
     this.arrivals();
@@ -364,6 +414,17 @@ export class World {
     this.objectives();
     this.armyMorale();
     this.checkEnd();
+  }
+
+  /** Regiments moved together keep pace with the slowest of them, so lines arrive as lines. */
+  private updateGroupSpeeds() {
+    this.groupSpeed.clear();
+    for (const u of this.units) {
+      if (!u.group || u.order.kind !== 'move' || u.waypoints.length === 0 || u.state === 'routing') continue;
+      const sp = this.baseSpeed(u);
+      const cur = this.groupSpeed.get(u.group);
+      if (cur === undefined || sp < cur) this.groupSpeed.set(u.group, sp);
+    }
   }
 
   private enemiesOf(u: Unit): Unit[] {
@@ -387,7 +448,7 @@ export class World {
       const other = this.sides[1 - side];
       let perMinute = RULES.baseIncome;
       OBJECTIVES.forEach((o, i) => {
-        if (this.owners[i] === side) perMinute += o.kind === 'station' ? RULES.stationIncome : RULES.objectiveIncome;
+        if (this.owners[i] === side) perMinute += o.kind === 'depot' ? RULES.depotIncome : RULES.objectiveIncome;
       });
       if (s.armyMorale <= other.armyMorale - RULES.catchUpGap) perMinute *= 1 + RULES.catchUpBonus;
       s.manpower = Math.min(RULES.stockpileCap, s.manpower + (perMinute / 60) * DT);
@@ -398,7 +459,7 @@ export class World {
     const s = this.sides[side];
     let perMinute = RULES.baseIncome;
     OBJECTIVES.forEach((o, i) => {
-      if (this.owners[i] === side) perMinute += o.kind === 'station' ? RULES.stationIncome : RULES.objectiveIncome;
+      if (this.owners[i] === side) perMinute += o.kind === 'depot' ? RULES.depotIncome : RULES.objectiveIncome;
     });
     if (s.armyMorale <= this.sides[1 - side].armyMorale - RULES.catchUpGap) perMinute *= 1 + RULES.catchUpBonus;
     return perMinute;
@@ -419,20 +480,27 @@ export class World {
     }
   }
 
-  private speedOf(u: Unit): number {
+  /** Speed on open ground, before terrain and keeping pace with the group. */
+  private baseSpeed(u: Unit): number {
     const def = UNIT_TYPES[u.type];
     const fm = u.type === 'cavalry' ? 1 : FORMATION[formationOf(u)].speed;
-    const t = terrainAt(u);
-    let s = def.speed * fm * t.speed;
+    let s = def.speed * RULES.moveSpeedScale * fm;
     if (u.state === 'wavering') s *= 0.7;
-    if (u.state === 'routing') s = def.speed * 1.1 * Math.max(0.6, t.speed);
     return s;
   }
 
+  private speedOf(u: Unit): number {
+    const def = UNIT_TYPES[u.type];
+    const t = terrainAt(u);
+    if (u.state === 'routing') return def.speed * RULES.moveSpeedScale * 1.1 * Math.max(0.6, t.speed);
+    const pace = this.groupSpeed.get(u.group);
+    return Math.min(this.baseSpeed(u), pace ?? Infinity) * t.speed;
+  }
+
   private turnRate(u: Unit): number {
-    if (u.type === 'cavalry') return 1.6;
-    if (formationOf(u) === 'line') return 0.5;
-    return 1.2;
+    if (u.type === 'cavalry') return 4.5;
+    if (formationOf(u) === 'line') return 1.5;
+    return 3;
   }
 
   private updateUnit(u: Unit) {
@@ -488,7 +556,8 @@ export class World {
     u.moving = false;
     if (goal && u.meleeWith === null) this.moveToward(u, goal, enemies, target);
 
-    if (!u.moving && u.meleeWith === null) this.fire(u, enemies, target);
+    if (u.type === 'artillery') this.bombard(u);
+    else if (!u.moving && u.meleeWith === null) this.fire(u, enemies, target);
     else if (u.type === 'light' && u.formation === 'skirmish' && u.meleeWith === null) this.fire(u, enemies, target, 0.5);
 
     this.updateMorale(u, enemies);
@@ -515,14 +584,22 @@ export class World {
       return;
     }
     const desired = Math.atan2(goal.y - u.y, goal.x - u.x);
-    u.facing = this.turnToward(u, desired);
-    const align = Math.cos(angleDiff(u.facing, desired));
-    if (align < 0.3) return; // still wheeling
-    const step = Math.min(d, this.speedOf(u) * align * DT);
+    const final = u.waypoints[u.waypoints.length - 1] ?? goal;
+    // A short step to the rear is taken backwards, still facing the enemy, instead of turning around.
+    const backstep = u.type !== 'cavalry' && u.type !== 'artillery' && dist(u, final) < 220
+      && Math.abs(angleDiff(u.facing, desired)) > (2 * Math.PI) / 3;
+    let step: number;
+    if (backstep) {
+      step = Math.min(d, this.speedOf(u) * 0.5 * DT);
+    } else {
+      u.facing = this.turnToward(u, desired);
+      // Keep marching while wheeling, slowing in proportion to how far off the heading is.
+      const align = Math.cos(angleDiff(u.facing, desired));
+      step = Math.min(d, this.speedOf(u) * Math.max(0.2, align) * DT);
+    }
     const next = { x: u.x + Math.cos(desired) * step, y: u.y + Math.sin(desired) * step };
 
     if (crossesRiver(u, next) && !nearCrossing(u) && !nearCrossing(next)) {
-      const final = u.waypoints[u.waypoints.length - 1] ?? goal;
       u.waypoints = planRoute(u, final);
       return;
     }
@@ -540,6 +617,35 @@ export class World {
     u.x = next.x;
     u.y = next.y;
     u.moving = true;
+  }
+
+  /**
+   * Artillery does not pick targets. It shells a circle the player places, so it only hurts
+   * whoever is inside that circle (friends included) and has to be re-aimed as the enemy moves.
+   */
+  private bombard(u: Unit) {
+    u.reload = Math.max(0, u.reload - DT);
+    const zone = u.fireZone;
+    if (!zone || u.formation !== 'unlimbered' || u.moving || u.meleeWith !== null) return;
+    const range = UNIT_TYPES.artillery.range * (terrainAt(u).hill ? 1.2 : 1);
+    if (dist(u, zone) > range) return;
+    u.facing = this.turnToward(u, Math.atan2(zone.y - u.y, zone.x - u.x));
+    if (u.reload > 0) return;
+    u.reload = RULES.shellInterval * (u.state === 'wavering' ? 1.5 : 1);
+    u.firedAt = this.time;
+    const a = this.rng.range(0, Math.PI * 2);
+    const r = Math.sqrt(this.rng.next()) * RULES.bombardRadius;
+    const hit = { x: zone.x + Math.cos(a) * r, y: zone.y + Math.sin(a) * r };
+    this.impacts.push({ ...hit, t: this.time });
+    const strength = u.men / u.maxMen;
+    for (const t of this.units) {
+      const d = dist(t, hit) - unitRadius(t) * 0.6;
+      if (d > RULES.shellBlast) continue;
+      const falloff = 1 - Math.max(0, d) / RULES.shellBlast;
+      const taken = t.type === 'cavalry' ? 1.1 : FORMATION[formationOf(t)].fireTaken;
+      const cas = RULES.shellDamage * strength * falloff * taken * terrainAt(t).cover * this.rng.range(0.7, 1.3);
+      this.damage(t, cas, u, 3.5);
+    }
   }
 
   private flankMultiplier(attacker: Vec, target: Unit): number {
@@ -739,7 +845,7 @@ export class World {
     for (const side of [0, 1] as Side[]) {
       const mine = this.owners.filter((o) => o === side).length;
       const theirs = this.owners.filter((o) => o === 1 - side).length;
-      this.sides[side].objectiveDrain += (0.6 * Math.max(0, theirs - mine) * mult / 60) * DT;
+      this.sides[side].objectiveDrain += (0.3 * Math.max(0, theirs - mine) * mult / 60) * DT;
     }
   }
 
@@ -749,7 +855,7 @@ export class World {
       const routing = this.units.filter((u) => u.side === side && u.state === 'routing').length;
       const lossFrac = s.lostMen / Math.max(1, s.fieldedMen);
       const timePressure = this.time > 18 * 60 ? (2 * (this.time - 18 * 60)) / 60 : 0;
-      s.armyMorale = Math.max(0, 100 - 75 * lossFrac - 4 * routing - 4 * s.removed - s.objectiveDrain - timePressure);
+      s.armyMorale = Math.max(0, 100 - 60 * lossFrac - 4 * routing - 4 * s.removed - s.objectiveDrain - timePressure);
     }
   }
 

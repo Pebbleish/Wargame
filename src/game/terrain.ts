@@ -16,7 +16,7 @@ export function paintTerrain(): HTMLCanvasElement {
   g.fillRect(0, 0, MAP.width, MAP.height);
 
   // Broad colour variation across the fields.
-  for (let i = 0; i < 260; i++) {
+  for (let i = 0; i < 520; i++) {
     const x = rng.range(0, MAP.width);
     const y = rng.range(0, MAP.height);
     const r = rng.range(120, 380);
@@ -29,7 +29,7 @@ export function paintTerrain(): HTMLCanvasElement {
   }
 
   // Ploughed field patches with fine hatching.
-  for (let i = 0; i < 140; i++) {
+  for (let i = 0; i < 300; i++) {
     const x = rng.range(0, MAP.width);
     const y = rng.range(0, MAP.height);
     const w = rng.range(140, 340);
@@ -86,21 +86,6 @@ export function paintTerrain(): HTMLCanvasElement {
   };
   for (const r of ROADS) strokeLine(r, 18, 'rgba(120,100,62,0.55)');
   for (const r of ROADS) strokeLine(r, 11, '#c8b489');
-
-  // Railway between the two stations' map edges.
-  const rail = (y: number) => {
-    strokeLine([{ x: 0, y: y + 70 }, { x: MAP.width, y: y + 70 }], 6, 'rgba(60,55,50,0.55)');
-    g.strokeStyle = 'rgba(60,55,50,0.55)';
-    g.lineWidth = 2;
-    for (let x = 0; x < MAP.width; x += 18) {
-      g.beginPath();
-      g.moveTo(x, y + 63);
-      g.lineTo(x, y + 77);
-      g.stroke();
-    }
-  };
-  rail(1480);
-  rail(520);
 
   // River with soft banks.
   strokeLine(RIVER, RIVER_WIDTH + 26, 'rgba(70,85,45,0.35)');
@@ -159,10 +144,10 @@ export function paintTerrain(): HTMLCanvasElement {
     }
   }
 
-  // Villages and stations: red-roofed houses clustered along the roads.
+  // Villages and supply depots: red-roofed houses clustered along the roads.
   for (const o of OBJECTIVES) {
     if (o.kind === 'bridge') continue;
-    const houses = o.kind === 'station' ? 9 : 16;
+    const houses = o.kind === 'depot' ? 6 : 16;
     for (let i = 0; i < houses; i++) {
       const a = rng.range(0, Math.PI * 2);
       const d = rng.range(15, VILLAGE_RADIUS);
@@ -180,16 +165,25 @@ export function paintTerrain(): HTMLCanvasElement {
       g.fillRect(-14, -1, 28, 2);
       g.restore();
     }
-    if (o.kind === 'station') {
-      g.fillStyle = '#7a7366';
-      g.fillRect(o.x - 60, o.y + 50, 120, 14);
-      g.fillStyle = '#5f4b3c';
-      g.fillRect(o.x - 30, o.y + 30, 60, 22);
+    if (o.kind === 'depot') {
+      // Supply tents and a wagon park.
+      for (let i = 0; i < 6; i++) {
+        const tx = o.x - 70 + (i % 3) * 45;
+        const ty = o.y + 40 + Math.floor(i / 3) * 34;
+        g.fillStyle = 'rgba(40,30,20,0.3)';
+        g.beginPath(); g.moveTo(tx + 4, ty + 16); g.lineTo(tx + 20, ty - 4); g.lineTo(tx + 36, ty + 16); g.fill();
+        g.fillStyle = '#e9e0c4';
+        g.beginPath(); g.moveTo(tx, ty + 12); g.lineTo(tx + 16, ty - 8); g.lineTo(tx + 32, ty + 12); g.closePath(); g.fill();
+      }
+      for (let i = 0; i < 5; i++) {
+        g.fillStyle = '#6b5236';
+        g.fillRect(o.x + 70, o.y - 40 + i * 22, 30, 12);
+      }
     }
   }
 
   // Drifting cloud shadows and a soft vignette.
-  for (let i = 0; i < 18; i++) {
+  for (let i = 0; i < 36; i++) {
     const x = rng.range(0, MAP.width);
     const y = rng.range(0, MAP.height);
     const r = rng.range(250, 600);

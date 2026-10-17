@@ -41,6 +41,7 @@ export class BattleScene extends Phaser.Scene {
   private hudTimer = 0;
   private keys: Record<string, boolean> = {};
   private pointerWorld: Vec = { x: 0, y: 0 };
+  private aiming = false; // placing the fire circle for the selected batteries
 
   constructor() {
     super('battle');
@@ -48,8 +49,24 @@ export class BattleScene extends Phaser.Scene {
 
   create() {
     this.newBattle();
-    if (!this.textures.exists('terrain')) this.textures.addCanvas('terrain', paintTerrain());
-    this.add.image(0, 0, 'terrain').setOrigin(0, 0);
+    // The painted map is split into tiles so it stays under the texture size limit of older graphics cards.
+    if (!this.textures.exists('terrain-0-0')) {
+      const full = paintTerrain();
+      const tw = Math.ceil(MAP.width / 2);
+      const th = Math.ceil(MAP.height / 2);
+      for (let ty = 0; ty < 2; ty++) {
+        for (let tx = 0; tx < 2; tx++) {
+          const tile = document.createElement('canvas');
+          tile.width = tw;
+          tile.height = th;
+          tile.getContext('2d')!.drawImage(full, -tx * tw, -ty * th);
+          this.textures.addCanvas(`terrain-${tx}-${ty}`, tile);
+        }
+      }
+    }
+    for (let ty = 0; ty < 2; ty++) {
+      for (let tx = 0; tx < 2; tx++) this.add.image(tx * Math.ceil(MAP.width / 2), ty * Math.ceil(MAP.height / 2), `terrain-${tx}-${ty}`).setOrigin(0, 0);
+    }
     this.zones = this.add.graphics();
     for (const o of OBJECTIVES) {
       this.add.text(o.x, o.y - 125, o.name, {
@@ -73,6 +90,8 @@ export class BattleScene extends Phaser.Scene {
       ready: () => this.world.apply({ kind: 'ready', side: PLAYER }),
       hold: () => this.world.apply({ kind: 'hold', side: PLAYER, ids: [...this.selected] }),
       formation: () => this.world.apply({ kind: 'formation', side: PLAYER, ids: [...this.selected] }),
+      aim: () => { if (this.selectedGuns().length) this.aiming = true; },
+      ceaseFire: () => this.world.apply({ kind: 'ceaseFire', side: PLAYER, ids: this.selectedGuns().map((u) => u.id) }),
       restart: () => {
         this.seed += 1;
         this.newBattle();
@@ -162,9 +181,11 @@ export class BattleScene extends Phaser.Scene {
       if (k === ' ') { this.paused = !this.paused; e.preventDefault(); }
       if (k === 'h') this.world.apply({ kind: 'hold', side: PLAYER, ids: [...this.selected] });
       if (k === 'f') this.world.apply({ kind: 'formation', side: PLAYER, ids: [...this.selected] });
+      if (k === 'b' && this.selectedGuns().length) this.aiming = true;
+      if (k === 'x') this.world.apply({ kind: 'ceaseFire', side: PLAYER, ids: this.selectedGuns().map((u) => u.id) });
       if (k === '+' || k === '=') this.speedIndex = Math.min(SPEEDS.length - 1, this.speedIndex + 1);
       if (k === '-' || k === '_') this.speedIndex = Math.max(0, this.speedIndex - 1);
-      if (k === 'escape') { this.pendingCallIn = null; this.selected.clear(); }
+      if (k === 'escape') { this.pendingCallIn = null; this.aiming = false; this.selected.clear(); }
       if (k === 'a' && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
         this.selected = new Set(this.world.units.filter((u) => u.side === PLAYER && u.state !== 'routing').map((u) => u.id));
@@ -192,7 +213,16 @@ export class BattleScene extends Phaser.Scene {
     return best;
   }
 
+  private selectedGuns(): Unit[] {
+    return this.selectedUnits().filter((u) => u.type === 'artillery');
+  }
+
   private leftRelease(d: Drag, end: Vec, shift: boolean) {
+    if (this.aiming) {
+      this.aiming = false;
+      this.world.apply({ kind: 'bombard', side: PLAYER, ids: this.selectedGuns().map((u) => u.id), x: end.x, y: end.y });
+      return;
+    }
     if (this.pendingCallIn) {
       const type = this.pendingCallIn;
       if (inZone(PLAYER, end)) {
@@ -237,8 +267,9 @@ export class BattleScene extends Phaser.Scene {
   }
 
   private rightRelease(d: Drag, end: Vec) {
-    if (this.pendingCallIn) {
+    if (this.pendingCallIn || this.aiming) {
       this.pendingCallIn = null;
+      this.aiming = false;
       return;
     }
     const sel = this.selectedUnits();
@@ -381,10 +412,45 @@ export class BattleScene extends Phaser.Scene {
     }
 
     // Units.
+    // Fire circles of our batteries, and shell bursts anyone can see.
+    for (const u of w.units) {
+      if (u.side !== PLAYER || u.type !== 'artillery' || !u.fireZone) continue;
+      const inRange = dist(u, u.fireZone) <= UNIT_TYPES.artillery.range;
+      const sel = this.selected.has(u.id);
+      const col = inRange ? 0xc0392b : 0x8a8170;
+      g.lineStyle(sel ? 5 : 3, col, sel ? 0.9 : 0.55);
+      g.strokeCircle(u.fireZone.x, u.fireZone.y, RULES.bombardRadius);
+      g.fillStyle(col, 0.08);
+      g.fillCircle(u.fireZone.x, u.fireZone.y, RULES.bombardRadius);
+      if (sel) {
+        g.lineStyle(2, col, 0.5);
+        g.lineBetween(u.x, u.y, u.fireZone.x, u.fireZone.y);
+      }
+    }
+    for (const i of w.impacts) {
+      const age = w.time - i.t;
+      g.fillStyle(0x3b3428, 0.35 * (1 - age / 3));
+      g.fillCircle(i.x, i.y, 22);
+      if (age < 1) {
+        g.fillStyle(0xf0c060, 0.8 * (1 - age));
+        g.fillCircle(i.x, i.y, 18 + age * 20);
+        g.fillStyle(0xeeeae0, 0.5 * (1 - age));
+        g.fillCircle(i.x + 10, i.y - 14, 28 + age * 30);
+      }
+    }
+
+    // Units, drawn between their last two positions so movement is smooth at any frame rate.
     const now = w.time;
+    const t = this.paused || w.phase !== 'battle' ? 1 : Phaser.Math.Clamp(this.acc / STEP, 0, 1);
     for (const u of w.units) {
       if (!u.seen[PLAYER]) continue;
-      this.drawUnit(g, u, now);
+      const view = {
+        ...u,
+        x: u.prev.x + (u.x - u.prev.x) * t,
+        y: u.prev.y + (u.y - u.prev.y) * t,
+        facing: u.prev.facing + Phaser.Math.Angle.Wrap(u.facing - u.prev.facing) * t,
+      };
+      this.drawUnit(g, view, now);
     }
 
     // Orders of the selected regiments.
@@ -421,6 +487,17 @@ export class BattleScene extends Phaser.Scene {
           this.blockOutline(o, { ...u, x: m.x, y: m.y, facing }, 0xfffaf0, 0.8);
         }
       }
+    }
+
+    // Range rings and the circle being placed while aiming artillery.
+    if (this.aiming) {
+      for (const u of this.selectedGuns()) {
+        o.lineStyle(2, 0xfffaf0, 0.5);
+        o.strokeCircle(u.x, u.y, UNIT_TYPES.artillery.range);
+      }
+      const ok = this.selectedGuns().some((u) => dist(u, this.pointerWorld) <= UNIT_TYPES.artillery.range);
+      o.lineStyle(4, ok ? 0xc0392b : 0x8a8170, 0.9);
+      o.strokeCircle(this.pointerWorld.x, this.pointerWorld.y, RULES.bombardRadius);
     }
 
     // Ghost of a call-in being placed.

@@ -21,11 +21,11 @@ export interface UnitTypeDef {
 
 export const UNIT_TYPES: Record<UnitTypeId, UnitTypeDef> = {
   line: {
-    id: 'line', label: 'Line infantry', men: 2400, speed: 6, range: 260, lethality: 0.0028,
+    id: 'line', label: 'Line infantry', men: 2400, speed: 6, range: 260, lethality: 0.0022,
     shock: 1.0, sight: 900, cost: 400, arrival: 60, cooldown: 90, formations: ['line', 'column', 'square'],
   },
   light: {
-    id: 'light', label: 'Light infantry', men: 900, speed: 7, range: 320, lethality: 0.004,
+    id: 'light', label: 'Light infantry', men: 900, speed: 7, range: 320, lethality: 0.0032,
     shock: 0.6, sight: 1100, cost: 250, arrival: 45, cooldown: 60, formations: ['skirmish', 'column'],
   },
   cavalry: {
@@ -33,7 +33,7 @@ export const UNIT_TYPES: Record<UnitTypeId, UnitTypeDef> = {
     shock: 2.6, sight: 1400, cost: 350, arrival: 45, cooldown: 120, formations: ['line'],
   },
   artillery: {
-    id: 'artillery', label: 'Artillery', men: 400, speed: 5, range: 1300, lethality: 0.03,
+    id: 'artillery', label: 'Artillery', men: 400, speed: 5, range: 1500, lethality: 0,
     shock: 0.3, sight: 1000, cost: 450, arrival: 90, cooldown: 120, formations: ['limbered', 'unlimbered'],
   },
   engineers: {
@@ -68,7 +68,7 @@ export const RULES = {
   stockpileCap: 1200,
   baseIncome: 60, // per minute
   objectiveIncome: 20,
-  stationIncome: 40,
+  depotIncome: 40,
   requisitionAmount: 300,
   requisitionMoraleCost: 10,
   catchUpGap: 25,
@@ -81,10 +81,17 @@ export const RULES = {
   rallyAt: 35,
   rallySafeDistance: 450,
   moraleRecovery: 0.6, // per second when not under pressure
-  limberTime: 10,
+  limberTime: 5,
+  moveSpeedScale: 4.5, // multiplies every unit's base speed
+
+  artilleryCap: 3, // batteries per side, including ones on the way
+  bombardRadius: 130, // shells land at random inside this circle
+  shellBlast: 45,
+  shellDamage: 70, // casualties from a direct hit at full battery strength
+  shellInterval: 3.5, // seconds between shells per battery
 
   captureRadius: 160,
-  zoneDepth: 450, // depth of each home deployment zone from its map edge
+  zoneDepth: 600, // depth of each home deployment zone from its map edge
 };
 
-export const MAP = { width: 3200, height: 2000 };
+export const MAP = { width: 4800, height: 3000 };

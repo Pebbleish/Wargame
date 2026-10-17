@@ -7,6 +7,8 @@ export interface HudHandlers {
   ready(): void;
   hold(): void;
   formation(): void;
+  aim(): void;
+  ceaseFire(): void;
   restart(): void;
   pause(): void;
   speed(delta: number): void;
@@ -109,6 +111,7 @@ export class Hud {
       <kbd>Right-click</kbd> move, or attack an enemy<br>
       <kbd>Right-drag</kbd> form a line along the drag<br>
       <kbd>F</kbd> change formation · <kbd>H</kbd> hold<br>
+      Artillery: <kbd>B</kbd> then click to place its fire circle (or right-click an enemy) · <kbd>X</kbd> cease fire<br>
       <kbd>Space</kbd> pause · <kbd>+</kbd>/<kbd>−</kbd> speed<br>
       <kbd>WASD</kbd> or arrows pan · wheel zoom</p>
       <p>Call in troops from the bar at the bottom, then click inside your deployment zone (the shaded strip on the left). They march in from the map edge.</p>
@@ -119,7 +122,7 @@ export class Hud {
 
     this.economy.innerHTML = `<span class="mp"></span><button data-a="req" title="+${RULES.requisitionAmount} manpower once, costs ${RULES.requisitionMoraleCost} army morale">Requisition</button><span class="cap" style="color:var(--muted)"></span>`;
     this.deploy.innerHTML = `<div class="h">Deploy your army</div><div style="margin:4px 0 8px;color:var(--muted)">Right-click to reposition regiments inside your zone. Spend your budget on extra troops.</div><button data-a="ready">Start battle</button>`;
-    this.selection.innerHTML = `<div class="info"></div><div class="btns"><button data-a="hold">Hold (H)</button><button data-a="formation">Formation (F)</button></div>`;
+    this.selection.innerHTML = `<div class="info"></div><div class="btns"><button data-a="hold">Hold (H)</button><button data-a="formation">Formation (F)</button></div><div class="btns guns"><button data-a="aim">Aim fire (B)</button><button data-a="cease">Cease fire (X)</button></div>`;
     this.economy.addEventListener('click', (e) => {
       if ((e.target as HTMLElement).dataset.a === 'req') this.h.requisition();
     });
@@ -130,6 +133,8 @@ export class Hud {
       const a = (e.target as HTMLElement).dataset.a;
       if (a === 'hold') this.h.hold();
       if (a === 'formation') this.h.formation();
+      if (a === 'aim') this.h.aim();
+      if (a === 'cease') this.h.ceaseFire();
     });
     this.end.addEventListener('click', (e) => {
       if ((e.target as HTMLElement).dataset.a === 'again') this.h.restart();
@@ -185,6 +190,7 @@ export class Hud {
       return;
     }
     this.selection.style.display = 'block';
+    (this.selection.querySelector('.guns') as HTMLElement).style.display = sel.some((u) => u.type === 'artillery') ? 'flex' : 'none';
     const info = this.selection.querySelector('.info') as HTMLElement;
     if (sel.length === 1) {
       const u = sel[0];
