@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>War Game Prototype</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link href="https://fonts.googleapis.com/css2?family=EB+Garamond:wght@500;700&family=Inter:wght@400;600&display=swap" rel="stylesheet" />
+    <style>
+      :root {
+        --ink: #2a2620;
+        --paper: rgba(244, 236, 214, 0.94);
+        --paper-solid: #f4ecd6;
+        --edge: #8c7b58;
+        --muted: #6b6250;
+        --blue: #2b2e38;
+        --gold: #d9a92b;
+        --good: #3f7a3a;
+        --bad: #a3392b;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root:not([data-theme="light"]) { --paper: rgba(244, 236, 214, 0.94); }
+      }
+      :root[data-theme="dark"] { --paper: rgba(244, 236, 214, 0.94); }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #1d1b16; color: var(--ink); font-family: Inter, system-ui, sans-serif; }
+      #app { position: fixed; inset: 0; }
+      #game { position: absolute; inset: 0; }
+      #game canvas { display: block; }
+      #hud { position: absolute; inset: 0; pointer-events: none; font-size: 13px; }
+      #hud .panel { pointer-events: auto; background: var(--paper); border: 1px solid var(--edge); border-radius: 6px; box-shadow: 0 2px 10px rgba(0,0,0,0.35); }
+      .serif { font-family: 'EB Garamond', Georgia, serif; }
+      button { font: inherit; cursor: pointer; border: 1px solid var(--edge); background: #fffaf0; color: var(--ink); border-radius: 4px; padding: 4px 10px; }
+      button:hover:not(:disabled) { background: #fff3cf; }
+      button:disabled { opacity: 0.5; cursor: default; }
+
+      #top { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 16px; padding: 6px 14px; white-space: nowrap; }
+      .army { display: flex; flex-direction: column; gap: 3px; min-width: 150px; }
+      .army .name { font-weight: 700; font-size: 16px; display: flex; justify-content: space-between; gap: 10px; }
+      .bar { height: 8px; background: rgba(0,0,0,0.15); border-radius: 4px; overflow: hidden; }
+      .bar > div { height: 100%; transition: width 0.3s; }
+      #clock { text-align: center; min-width: 120px; }
+      #clock .time { font-size: 24px; font-weight: 700; line-height: 1; }
+      #clock .sub { font-size: 11px; color: var(--muted); }
+
+      #economy { position: absolute; top: 74px; left: 50%; transform: translateX(-50%); padding: 4px 12px; display: flex; gap: 12px; align-items: center; white-space: nowrap; }
+      #captions { position: absolute; top: 112px; left: 50%; transform: translateX(-50%); text-align: center; pointer-events: none; }
+      #captions div { font-family: 'EB Garamond', Georgia, serif; font-size: 18px; color: #fffaf0; text-shadow: 0 1px 3px #000, 0 0 8px rgba(0,0,0,0.6); margin: 2px 0; transition: opacity 0.6s; }
+
+      #callins { position: absolute; bottom: 8px; left: 50%; transform: translateX(-50%); display: flex; gap: 6px; padding: 6px; align-items: stretch; }
+      .card { position: relative; width: 122px; padding: 6px 8px; border: 1px solid var(--edge); border-radius: 5px; background: #fffaf0; cursor: pointer; overflow: hidden; text-align: left; }
+      .card.active { outline: 2px solid #c58b00; }
+      .card.off { opacity: 0.55; cursor: default; }
+      .card .t { font-weight: 600; }
+      .card .c { font-size: 11px; color: var(--muted); }
+      .card .cool { position: absolute; left: 0; bottom: 0; height: 3px; background: #c58b00; }
+      .card .why { font-size: 10px; color: var(--bad); min-height: 12px; }
+      #queue { display: flex; flex-direction: column; justify-content: center; gap: 2px; padding: 0 6px; min-width: 120px; font-size: 11px; color: var(--muted); }
+
+      #selection { position: absolute; bottom: 8px; left: 8px; width: 250px; padding: 8px 10px; display: none; }
+      #selection .n { font-family: 'EB Garamond', Georgia, serif; font-weight: 700; font-size: 17px; }
+      #selection .row { display: flex; justify-content: space-between; color: var(--muted); }
+      #selection .btns { display: flex; gap: 6px; margin-top: 6px; }
+
+      #controls { position: absolute; top: 8px; right: 8px; display: flex; gap: 6px; padding: 6px; }
+      #help { position: absolute; top: 56px; right: 8px; width: 300px; padding: 10px 14px; line-height: 1.5; }
+      #help h3 { margin: 0 0 4px; font-family: 'EB Garamond', Georgia, serif; font-size: 20px; }
+      #help kbd { font-family: inherit; font-size: 11px; border: 1px solid var(--edge); border-radius: 3px; padding: 0 4px; background: #fffaf0; }
+      #help p { margin: 6px 0; }
+
+      #deploy { position: absolute; top: 112px; left: 50%; transform: translateX(-50%); padding: 8px 14px; text-align: center; }
+      #deploy .h { font-family: 'EB Garamond', Georgia, serif; font-weight: 700; font-size: 20px; }
+
+      #tooltip { position: absolute; padding: 6px 8px; font-size: 12px; display: none; pointer-events: none; max-width: 240px; }
+      #tooltip .n { font-weight: 600; }
+
+      #end { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(20,18,12,0.55); pointer-events: auto; }
+      #end .panel { padding: 22px 30px; text-align: center; min-width: 320px; }
+      #end h2 { font-family: 'EB Garamond', Georgia, serif; font-size: 38px; margin: 0; }
+      #end p { margin: 8px 0 16px; color: var(--muted); }
+      #end table { margin: 0 auto 16px; border-collapse: collapse; }
+      #end td { padding: 2px 10px; text-align: right; }
+      #end td:first-child { text-align: left; color: var(--muted); }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <div id="game"></div>
+      <div id="hud"></div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
