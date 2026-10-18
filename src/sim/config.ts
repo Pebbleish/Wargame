@@ -52,8 +52,6 @@ export const FORMATION = {
   fortified: { fire: 0.9, speed: 0.12, fireTaken: 0.7, moraleTaken: 0.65, vsCavalry: 2.0 },
 } as const;
 
-// Fortifying while already in combat only gets a hasty position: weaker than digging in properly.
-export const HASTY_FORTIFIED = { fire: 0.9, speed: 0.12, fireTaken: 0.85, moraleTaken: 0.8, vsCavalry: 1.5 } as const;
 
 // Cavalry in formation is still quick enough to charge.
 export const CAVALRY_FORMATION_SPEED = 0.85;
@@ -72,7 +70,7 @@ export const RULES = {
   matchLength: 20 * 60,
   finalPushAt: 14 * 60,
   callInCutoff: 17 * 60,
-  timePressureAt: 12 * 60, // army morale starts to drain on both sides from here
+  timePressureAt: 10 * 60, // army morale starts to drain on both sides from here
   deploymentTime: 60,
   dominationHold: 60, // holding every objective this long wins outright
 
@@ -93,8 +91,7 @@ export const RULES = {
   rallyAt: 35,
   rallySafeDistance: 450,
   moraleRecovery: 0.6, // per second when not under pressure
-  fortifyTime: 10, // digging in out of combat takes this long before the bonuses apply
-  hastyFortifyTime: 4, // a hasty position in combat is quicker to make
+  fortifyTime: 10, // digging in (only possible out of combat) takes this long before the bonuses apply
   artilleryFortifyTime: 5, // guns have to set up (fortify) before they can fire
   combatRange: 500, // a unit with a visible enemy this close, or under fire, counts as in combat
   moveSpeedScale: 4.5, // multiplies every unit's base speed
@@ -119,7 +116,8 @@ export const RULES = {
   borderWidth: 40, // impassable strip around the map edge
   edgeDisperseTime: 30, // wavering or routing units pinned at the border this long disperse
   townDeployRadius: 450, // starting regiments can be repositioned this close to their home towns
-  zoneDepth: 600, // depth of each home deployment zone from its map edge
+  zoneStart: 500, // distance of each deployment strip from its own map edge
+  zoneDepth: 700, // depth of each deployment strip
 };
 
 export const MAP = { width: 4800, height: 3000 };

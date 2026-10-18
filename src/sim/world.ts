@@ -1,5 +1,5 @@
 import {
-  CAVALRY_FORMATION_SPEED, FORMATION, FORMATIONS, Formation, HASTY_FORTIFIED, MAP, RULES, UNIT_SIZE, UNIT_TYPES, UnitTypeId,
+  CAVALRY_FORMATION_SPEED, FORMATION, FORMATIONS, Formation, MAP, RULES, UNIT_SIZE, UNIT_TYPES, UnitTypeId,
 } from './config';
 import {
   CROSSINGS, EARTHWORKS, OBJECTIVES, Vec, addEarthwork, addPontoon, clampToMap, crossesRiver, dist, generateMap, nearCrossing,
@@ -31,7 +31,6 @@ export interface Unit {
   waypoints: Vec[];
   state: UnitState;
   routs: number;
-  hasty: boolean; // fortified in combat: the weaker version
   holdPosition: boolean; // ordered to hold: will not chase whoever attacks it
   lastAttacker: number | null; // the most recent enemy to hurt this unit
   building: number; // engineers: seconds of work left on earthworks or a pontoon bridge
@@ -149,7 +148,8 @@ export function unitRadius(u: Pick<Unit, 'type'> & FormationView): number {
 
 export function inZone(side: Side, p: Vec): boolean {
   if (p.y < 0 || p.y > MAP.height) return false;
-  return side === 0 ? p.x >= 0 && p.x <= RULES.zoneDepth : p.x >= MAP.width - RULES.zoneDepth && p.x <= MAP.width;
+  const x = side === 0 ? p.x : MAP.width - p.x;
+  return x >= RULES.zoneStart && x <= RULES.zoneStart + RULES.zoneDepth;
 }
 
 export function homeEdgeX(side: Side): number {
@@ -251,7 +251,6 @@ export class World {
       waypoints: [],
       state: 'ok',
       routs: 0,
-      hasty: false,
       holdPosition: false,
       lastAttacker: null,
       building: 0,
@@ -385,7 +384,12 @@ export class World {
         for (const id of cmd.ids) {
           const u = own(id);
           if (!u) continue;
-          const next = cmd.formation ?? FORMATIONS[(FORMATIONS.indexOf(u.formation) + 1) % FORMATIONS.length];
+          let next = cmd.formation ?? FORMATIONS[(FORMATIONS.indexOf(u.formation) + 1) % FORMATIONS.length];
+          // Troops already in combat cannot dig in; cycling skips past fortified.
+          if (next === 'fortified' && !this.canFortify(u)) {
+            if (cmd.formation) continue;
+            next = FORMATIONS[(FORMATIONS.indexOf(next) + 1) % FORMATIONS.length];
+          }
           if (next === u.formation) continue;
           u.marching = false;
           if (next === 'fortified') this.fortify(u);
@@ -469,11 +473,14 @@ export class World {
     if (u.formation !== 'fortified') this.fortify(u);
   }
 
-  /** Dig in: properly when out of combat, or a weaker hasty position when already fighting. */
+  /** Only troops out of combat can dig in. Guns always can: fortified is how a battery sets up to fire. */
+  canFortify(u: Unit): boolean {
+    return u.type === 'artillery' || !this.inCombat(u);
+  }
+
   private fortify(u: Unit) {
     u.formation = 'fortified';
-    u.hasty = this.inCombat(u);
-    u.digIn = u.type === 'artillery' ? RULES.artilleryFortifyTime : u.hasty ? RULES.hastyFortifyTime : RULES.fortifyTime;
+    u.digIn = u.type === 'artillery' ? RULES.artilleryFortifyTime : RULES.fortifyTime;
   }
 
   /** Why these engineers cannot start building here, or null if they can. */
@@ -493,10 +500,9 @@ export class World {
     return this.units.some((e) => e.side !== u.side && e.state !== 'routing' && e.seen[u.side] && dist(e, u) < RULES.combatRange);
   }
 
-  /** Formation numbers for a unit right now, including the hasty fortified variant. */
+  /** Formation numbers for a unit right now. */
   stats(u: Unit) {
-    const f = formationOf(u);
-    return f === 'fortified' && u.hasty ? HASTY_FORTIFIED : FORMATION[f];
+    return FORMATION[formationOf(u)];
   }
 
   private startBattle() {
@@ -675,11 +681,8 @@ export class World {
     if (u.type === 'artillery' && u.fireZone && !goal && !u.marching && u.formation !== 'fortified') this.fortify(u);
     u.moving = false;
     if (goal && u.meleeWith === null) this.moveToward(u, goal, enemies, target);
-    // Leaving prepared positions means digging in again at the next stop.
-    if (u.moving && u.formation === 'fortified') {
-      u.hasty = true;
-      u.digIn = RULES.hastyFortifyTime;
-    }
+    // Leaving prepared positions gives up the fortification.
+    if (u.moving && u.formation === 'fortified') u.formation = 'formation';
 
     if (u.type === 'artillery') this.bombard(u);
     else if (!u.moving && u.meleeWith === null) this.fire(u, enemies, target);
@@ -1047,7 +1050,7 @@ export class World {
       const s = this.sides[side];
       const routing = this.units.filter((u) => u.side === side && u.state === 'routing').length;
       const lossFrac = s.lostMen / Math.max(1, s.fieldedMen);
-      const timePressure = this.time > RULES.timePressureAt ? (3 * (this.time - RULES.timePressureAt)) / 60 : 0;
+      const timePressure = this.time > RULES.timePressureAt ? (4 * (this.time - RULES.timePressureAt)) / 60 : 0;
       s.armyMorale = Math.max(0, 100 - 60 * lossFrac - 4 * routing - 4 * s.removed - s.objectiveDrain - timePressure);
     }
   }

@@ -120,17 +120,17 @@ export class Hud {
     this.help.innerHTML = `
       <h3>How to play</h3>
       <p>Break the enemy army's morale, hold every objective for ${RULES.dominationHold}s, or lead on points when the ${RULES.matchLength / 60}-minute clock runs out.</p>
-      <p><kbd>Left-click</kbd> select · <kbd>drag</kbd> box select · <kbd>Shift</kbd> add<br>
+      <p><kbd>Left-click</kbd> select · <kbd>drag</kbd> move the map · <kbd>Shift</kbd>+drag box select · <kbd>Shift</kbd>+click add<br>
       <kbd>Right-click</kbd> move, or attack an enemy<br>
       <kbd>Right-drag</kbd> form a line along the drag<br>
       <kbd>F</kbd> cycle formation, or <kbd>1</kbd> march · <kbd>2</kbd> formation · <kbd>3</kbd> fortify · <kbd>H</kbd> hold<br>
       Artillery: <kbd>B</kbd> then click to place its fire circle (or right-click an enemy) · <kbd>X</kbd> cease fire<br>
       <kbd>Space</kbd> pause · <kbd>+</kbd>/<kbd>−</kbd> speed<br>
       <kbd>WASD</kbd> or arrows pan · wheel zoom</p>
-      <p><b>Marching</b> is fastest but fights badly; troops march automatically on any move out of combat and form up when they arrive. <b>Formation</b> is the fighting stance. <b>Fortified</b> barely moves but takes less damage and loses morale more slowly: dug in properly out of combat (${RULES.fortifyTime}s), or a weaker hasty position if already fighting. Shells hit fortified troops harder.</p>
+      <p><b>Marching</b> is fastest but fights badly; troops march automatically on any move out of combat and form up when they arrive. <b>Formation</b> is the fighting stance. <b>Fortified</b> barely moves but takes less damage and loses morale more slowly. Digging in takes ${RULES.fortifyTime}s and is only possible out of combat; moving gives it up. Shells hit fortified troops harder.</p>
       <p>Engineers (<kbd>E</kbd>) build earthworks that give cover like a village, or a pontoon bridge when standing at a river (up to ${RULES.maxWorks} per side). Troops near engineers dig in twice as fast.</p>
       <p>Artillery stops and sets up when you give it a target, and only fires once set up. Units in woods are hidden unless your troops are within ${RULES.woodsSpotRange}m; firing guns give themselves away.</p>
-      <p>Call in troops from the bar at the bottom, then click inside your deployment zone (the shaded strip at the bottom). They march in from the map edge.</p>
+      <p>Call in troops from the bar at the bottom, then click inside your deployment zone (the shaded strip near the bottom). They march in from your map edge.</p>
       <p><button data-a="close">Got it</button></p>`;
     this.help.addEventListener('click', (e) => {
       if ((e.target as HTMLElement).dataset.a === 'close') this.help.style.display = 'none';
@@ -235,7 +235,6 @@ export class Hud {
     if (u.building > 0) return `${u.buildKind === 'pontoon' ? 'Bridging' : 'Building works'} ${Math.ceil(u.building)}s`;
     if (u.marching) return 'Marching (auto)';
     if (u.formation === 'fortified' && formationOf(u) !== 'fortified') return u.type === 'artillery' ? 'Setting up guns…' : 'Digging in…';
-    if (u.formation === 'fortified' && u.hasty) return 'Fortified (hasty)';
     return FORMATION_LABEL[u.formation];
   }
 

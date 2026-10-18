@@ -26,6 +26,7 @@ interface Drag {
   screen: Vec;
   current: Vec;
   moved: boolean;
+  panning: boolean; // a plain left-drag moves the map; Shift+drag box-selects
 }
 
 export class BattleScene extends Phaser.Scene {
@@ -181,12 +182,14 @@ export class BattleScene extends Phaser.Scene {
         this.pan = { x: cam.scrollX, y: cam.scrollY, sx: p.x, sy: p.y };
         return;
       }
-      this.drag = { button: p.button, start: w, screen: { x: p.x, y: p.y }, current: w, moved: false };
+      const panning = p.button === 0 && !p.event.shiftKey && !this.aiming && !this.pendingCallIn;
+      if (panning) this.pan = { x: cam.scrollX, y: cam.scrollY, sx: p.x, sy: p.y };
+      this.drag = { button: p.button, start: w, screen: { x: p.x, y: p.y }, current: w, moved: false, panning };
     });
 
     this.input.on('pointermove', (p: Phaser.Input.Pointer) => {
       this.pointerWorld = { x: p.worldX, y: p.worldY };
-      if (this.pan) {
+      if (this.pan && (!this.drag?.panning || Math.hypot(p.x - this.pan.sx, p.y - this.pan.sy) > 8)) {
         const d = screenToWorldDir((p.x - this.pan.sx) / cam.zoom, (p.y - this.pan.sy) / cam.zoom);
         cam.scrollX = this.pan.x - d.x;
         cam.scrollY = this.pan.y - d.y;
@@ -207,7 +210,8 @@ export class BattleScene extends Phaser.Scene {
       }
       const d = this.drag;
       this.drag = null;
-      if (!d) return;
+      if (d?.panning) this.pan = null;
+      if (!d || (d.panning && d.moved)) return;
       const end = { x: p.worldX, y: p.worldY };
       if (d.button === 0) this.leftRelease(d, end, p.event.shiftKey);
       if (d.button === 2) this.rightRelease(d, end);
@@ -435,13 +439,17 @@ export class BattleScene extends Phaser.Scene {
     this.zones.clear();
     const deploying = w.phase === 'deploy' || this.pendingCallIn !== null;
     this.zones.fillStyle(COLORS[0].fill, deploying ? 0.22 : 0.08);
-    this.zones.fillRect(0, 0, RULES.zoneDepth, MAP.height);
+    const z0 = RULES.zoneStart;
+    const z1 = RULES.zoneStart + RULES.zoneDepth;
+    this.zones.fillRect(z0, 0, RULES.zoneDepth, MAP.height);
     this.zones.fillStyle(COLORS[1].fill, 0.1);
-    this.zones.fillRect(MAP.width - RULES.zoneDepth, 0, RULES.zoneDepth, MAP.height);
+    this.zones.fillRect(MAP.width - z1, 0, RULES.zoneDepth, MAP.height);
     this.zones.lineStyle(3, COLORS[0].fill, deploying ? 0.7 : 0.3);
-    this.zones.lineBetween(RULES.zoneDepth, 0, RULES.zoneDepth, MAP.height);
+    this.zones.lineBetween(z0, 0, z0, MAP.height);
+    this.zones.lineBetween(z1, 0, z1, MAP.height);
     this.zones.lineStyle(3, COLORS[1].fill, 0.35);
-    this.zones.lineBetween(MAP.width - RULES.zoneDepth, 0, MAP.width - RULES.zoneDepth, MAP.height);
+    this.zones.lineBetween(MAP.width - z0, 0, MAP.width - z0, MAP.height);
+    this.zones.lineBetween(MAP.width - z1, 0, MAP.width - z1, MAP.height);
 
     // During deployment, starting regiments can also be placed around your home towns.
     if (w.phase === 'deploy') {
@@ -578,7 +586,7 @@ export class BattleScene extends Phaser.Scene {
 
     // Drag feedback.
     const d = this.drag;
-    if (d && d.moved && d.button === 0 && !this.pendingCallIn) {
+    if (d && d.moved && d.button === 0 && !d.panning && !this.pendingCallIn) {
       o.lineStyle(2, 0xfffaf0, 0.9);
       o.strokeRect(Math.min(d.start.x, d.current.x), Math.min(d.start.y, d.current.y), Math.abs(d.current.x - d.start.x), Math.abs(d.current.y - d.start.y));
     }

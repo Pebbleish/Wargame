@@ -29,7 +29,7 @@ export class AI {
     if (world.sides[this.side].ready) return [];
     const buys: [UnitTypeId, number][] = [['line', 1200], ['line', 1800], ['artillery', 1500]];
     const cmds: Command[] = buys.map(([type, y]) => ({
-      kind: 'callIn', side: this.side, type, x: this.homeX(type === 'artillery' ? 200 : 320), y: this.side === 0 ? y : MAP.height - y,
+      kind: 'callIn', side: this.side, type, x: this.homeX(RULES.zoneStart + (type === 'artillery' ? 250 : 450)), y: this.side === 0 ? y : MAP.height - y,
     }));
     cmds.push({ kind: 'ready', side: this.side });
     return cmds;
@@ -154,7 +154,7 @@ export class AI {
     const needs = this.needs(world).sort((a, b) => b.need - a.need);
     this.calls += 1;
     const y = Math.max(100, Math.min(MAP.height - 100, needs[0].pos.y));
-    return [{ kind: 'callIn', side: this.side, type: wanted, x: this.homeX(RULES.zoneDepth - 120), y }];
+    return [{ kind: 'callIn', side: this.side, type: wanted, x: this.homeX(RULES.zoneStart + RULES.zoneDepth - 150), y }];
   }
 
   /** A per-side running number for each regiment, so both AIs spread out identically. */
