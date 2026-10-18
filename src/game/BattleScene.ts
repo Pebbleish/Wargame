@@ -284,23 +284,15 @@ export class BattleScene extends Phaser.Scene {
     return this.selectedUnits().filter((u) => u.type === 'artillery');
   }
 
-  private selectedWagons(): Unit[] {
-    return this.selectedUnits().filter((u) => u.type === 'supply');
-  }
-
-  /** Units that work on an area you place: batteries (fire circle) and supply wagons (supply area). */
   private selectedAimers(): Unit[] {
-    return [...this.selectedGuns(), ...this.selectedWagons()];
+    return this.selectedGuns();
   }
 
   private leftRelease(d: Drag, end: Vec, shift: boolean) {
     if (this.spectating) return;
     if (this.aiming) {
       this.aiming = false;
-      const guns = this.selectedGuns().map((u) => u.id);
-      const wagons = this.selectedWagons().map((u) => u.id);
-      if (guns.length) this.world.apply({ kind: 'bombard', side: PLAYER, ids: guns, x: end.x, y: end.y });
-      if (wagons.length) this.world.apply({ kind: 'supplyArea', side: PLAYER, ids: wagons, x: end.x, y: end.y });
+      this.world.apply({ kind: 'bombard', side: PLAYER, ids: this.selectedGuns().map((u) => u.id), x: end.x, y: end.y });
       return;
     }
     if (this.pendingCallIn) {
@@ -563,19 +555,17 @@ export class BattleScene extends Phaser.Scene {
         g.lineBetween(u.x, u.y, u.fireZone.x, u.fireZone.y);
       }
     }
-    // Supply areas of our wagon trains: green while served, grey when the wagons are moving or out of reach.
+    // Our wagon trains: the zone they supply on their own, and the spot their last cart is serving.
     for (const u of w.units) {
-      if ((u.side !== PLAYER && !this.spectating) || u.type !== 'supply' || !u.supplyZone) continue;
-      const active = w.supplyActive(u);
+      if ((u.side !== PLAYER && !this.spectating) || u.type !== 'supply' || u.state === 'routing') continue;
       const sel = this.selected.has(u.id);
-      const col = active ? 0x4f9d4a : 0x8a8170;
-      g.lineStyle(sel ? 5 : 3, col, sel ? 0.9 : 0.55);
-      g.strokeCircle(u.supplyZone.x, u.supplyZone.y, RULES.supplyAreaRadius);
-      g.fillStyle(col, 0.08);
-      g.fillCircle(u.supplyZone.x, u.supplyZone.y, RULES.supplyAreaRadius);
-      if (sel || active) {
-        g.lineStyle(2, col, sel ? 0.6 : 0.3);
-        g.lineBetween(u.x, u.y, u.supplyZone.x, u.supplyZone.y);
+      g.lineStyle(sel ? 4 : 2, 0x4f9d4a, sel ? 0.7 : 0.3);
+      g.strokeCircle(u.x, u.y, RULES.supplyRange);
+      if (u.supplyZone && w.supplyActive(u)) {
+        g.lineStyle(3, 0x4f9d4a, 0.6);
+        g.strokeCircle(u.supplyZone.x, u.supplyZone.y, RULES.supplyAreaRadius);
+        g.fillStyle(0x4f9d4a, 0.08);
+        g.fillCircle(u.supplyZone.x, u.supplyZone.y, RULES.supplyAreaRadius);
       }
     }
 
@@ -695,20 +685,9 @@ export class BattleScene extends Phaser.Scene {
         o.lineStyle(2, 0xfffaf0, 0.5);
         o.strokeCircle(u.x, u.y, UNIT_TYPES.artillery.range);
       }
-      for (const u of this.selectedWagons()) {
-        o.lineStyle(2, 0xbfe3b0, 0.5);
-        o.strokeCircle(u.x, u.y, RULES.supplyRange);
-      }
-      if (this.selectedGuns().length) {
-        const ok = this.selectedGuns().some((u) => dist(u, this.pointerWorld) <= UNIT_TYPES.artillery.range);
-        o.lineStyle(4, ok ? 0xc0392b : 0x8a8170, 0.9);
-        o.strokeCircle(this.pointerWorld.x, this.pointerWorld.y, RULES.bombardRadius);
-      }
-      if (this.selectedWagons().length) {
-        const ok = this.selectedWagons().some((u) => dist(u, this.pointerWorld) <= RULES.supplyRange);
-        o.lineStyle(4, ok ? 0x4f9d4a : 0x8a8170, 0.9);
-        o.strokeCircle(this.pointerWorld.x, this.pointerWorld.y, RULES.supplyAreaRadius);
-      }
+      const ok = this.selectedGuns().some((u) => dist(u, this.pointerWorld) <= UNIT_TYPES.artillery.range);
+      o.lineStyle(4, ok ? 0xc0392b : 0x8a8170, 0.9);
+      o.strokeCircle(this.pointerWorld.x, this.pointerWorld.y, RULES.bombardRadius);
     }
 
     // Ghost of a call-in being placed.

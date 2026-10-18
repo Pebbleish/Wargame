@@ -136,7 +136,7 @@ export class Hud {
       <kbd>WASD</kbd> or arrows pan · wheel zoom</p>
       <p><b>Marching</b> is fastest but fights badly; troops march automatically on any move out of combat and form up when they arrive. <b>Formation</b> is the fighting stance. <b>Fortified</b> barely moves but takes less damage and loses morale more slowly. Digging in takes ${RULES.fortifyTime}s and is only possible out of combat; moving gives it up. Shells hit fortified troops harder.</p>
       <p>Your <b>general</b> (the block with the banner) commands from the field. Regiments inside the ring around the general get orders at once and hold their nerve better; orders to the rest are carried by couriers, which enemy cavalry can capture. Losing the general costs ${RULES.generalLossMorale} army morale. Routed troops rally on their own once safe, and much sooner near the general. <kbd>Double-click</kbd> a regiment to select its whole brigade.</p>
-      <p>Marching, charging and melee tire troops; resting restores them. Firing uses <b>ammunition</b>: below ${RULES.lowAmmo}% fire is halved, and at 0 they stop firing. <b>Supply wagons</b> (<kbd>B</kbd> then click) send carts to an area within ${RULES.supplyRange}m; troops there refill and recover. Carts can be shot up on the road. Depots you hold and your deployment zone also refill slowly. Regiments gain experience in battle (gold pips: veteran, elite); reinforcements arrive green.</p>
+      <p>Marching, charging and melee tire troops; resting restores them. Firing uses <b>ammunition</b>: below ${RULES.lowAmmo}% fire is halved, and at 0 they stop firing. <b>Supply wagons</b> (each army starts with two) send carts to troops within ${RULES.supplyRange}m; troops a cart reaches refill and recover. They do it on their own: carts go to whoever inside the wagons' green ring needs it most. Wagons only send carts while standing still. Carts can be shot up on the road. Depots you hold and your deployment zone also refill slowly. Regiments gain experience in battle (gold pips: veteran, elite); reinforcements arrive green.</p>
       <p>Engineers (<kbd>E</kbd>) build earthworks that give cover like a village, or a pontoon bridge when standing at a river (up to ${RULES.maxWorks} per side). Troops near engineers dig in twice as fast.</p>
       <p>Artillery stops and sets up when you give it a target, and only fires once set up. Units in woods are hidden unless your troops are within ${RULES.woodsSpotRange}m; firing guns give themselves away.</p>
       <p>Call in troops from the bar on the left, then click inside your deployment zone (the shaded strip near the bottom). They march in from your map edge.</p>
@@ -226,11 +226,7 @@ export class Hud {
     for (const f of ['marching', 'formation', 'fortified'] as Formation[]) {
       (this.selection.querySelector(`[data-a="fm-${f}"]`) as HTMLElement).classList.toggle('on', sel.every((u) => u.formation === f));
     }
-    const guns = sel.some((u) => u.type === 'artillery');
-    const wagons = sel.some((u) => u.type === 'supply');
-    (this.selection.querySelector('.guns') as HTMLElement).style.display = guns || wagons ? 'flex' : 'none';
-    setHtml(this.selection.querySelector('[data-a="aim"]') as HTMLElement, guns ? 'Aim fire (B)' : 'Supply area (B)');
-    setHtml(this.selection.querySelector('[data-a="cease"]') as HTMLElement, guns ? 'Cease fire (X)' : 'Stop supply (X)');
+    (this.selection.querySelector('.guns') as HTMLElement).style.display = sel.some((u) => u.type === 'artillery') ? 'flex' : 'none';
     (this.selection.querySelector('.eng') as HTMLElement).style.display = sel.some((u) => u.type === 'engineers') ? 'flex' : 'none';
     const info = this.selection.querySelector('.info') as HTMLElement;
     if (sel.length === 1) {
@@ -260,7 +256,7 @@ export class Hud {
       rows += row('Fatigue', `${fatigue} (${u.fatigue.toFixed(0)})`, u.fatigue >= 70);
       if (UNIT_TYPES[u.type].range > 0 || u.type === 'artillery') rows += row('Ammunition', `${u.ammo.toFixed(0)}%`, u.ammo < RULES.lowAmmo);
       if (u.type === 'supply') {
-        const status = !u.supplyZone ? 'No supply area' : w?.supplyActive(u) ? `Supplying (${Math.ceil(u.supplyLeft)}s)` : w?.canSendCarts(u) ? 'Cart on the way' : 'Area out of reach';
+        const status = (!u.supplyZone ? 'Nobody needs supply' : w?.supplyActive(u) ? `Supplying (${Math.ceil(u.supplyLeft)}s)` : w?.canSendCarts(u) ? 'Cart on the way' : 'Waiting');
         rows += row('Supply', status);
       }
       if (w && u.type !== 'general') rows += row('Command', w.inCommand(u) ? 'In command radius' : w.hasCourier(u.id) ? 'Courier on the way' : 'Orders by courier');

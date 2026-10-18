@@ -138,7 +138,7 @@ export const RULES = {
   shellAmmo: 1.5, // per shell
   lowAmmo: 25, // below this, fire is halved
   resupplyRate: 2, // per second inside a wagon train's supply area (half that at depots and in the deployment zone)
-  supplyRange: 900, // wagons serve an area up to this far away, without driving to it
+  supplyRange: 900, // wagons send carts to troops this far away, without driving there themselves
   supplyAreaRadius: 220, // size of the supply area
   cartSpeed: 35, // supply carts drive to the area at this speed
   cartInterval: 10, // seconds between carts from one wagon train
@@ -147,7 +147,8 @@ export const RULES = {
   cartDamage: 30, // cart health (of 100) lost per second per enemy in range; a shell burst destroys it
   supplyFatigueRelief: 1.2, // extra fatigue recovered per second inside the supply area
   depotSupplyRadius: 300, // held depots refill regiments this close
-  supplyCap: 2, // supply wagons per side
+  supplyCap: 3, // supply wagons per side (each army starts with 2)
+  autoSupplyMinNeed: 15, // carts only go where missing ammunition and fatigue add up to this much
 
   calledInXp: 0, // reinforcements arrive green
   coreXp: 25, // the starting army is trained

@@ -83,7 +83,6 @@ export class AI {
         // Pull back when the enemy gets close.
         if (nd < 600) p.x = u.x - this.dir() * 400;
         this.moveIfFar(cmds, u, clampToMap(p, RULES.borderWidth + 80), 200);
-        if (u.type === 'supply') this.aimSupply(world, cmds, u, mine, visibleEnemies);
         continue;
       }
 
@@ -154,23 +153,6 @@ export class AI {
       return;
     }
     if (!u.fireZone || dist(u.fireZone, best) > 60) cmds.push({ kind: 'bombard', side: this.side, ids: [u.id], x: best.x, y: best.y });
-  }
-
-  /** Point the wagons' supply area at the busiest stretch of our own line within reach. */
-  private aimSupply(world: World, cmds: Command[], u: Unit, mine: Unit[], enemies: Unit[]) {
-    if ((this.lastAim.get(u.id) ?? -99) > world.time - 8 || u.order.kind === 'move') return;
-    this.lastAim.set(u.id, world.time);
-    let best: Unit | undefined;
-    let bestScore = 0;
-    for (const f of mine) {
-      if (f.type === 'supply' || f.type === 'general' || dist(u, f) > RULES.supplyRange * 0.95) continue;
-      // Carts would be shot up in the firing line, so supply troops just behind it.
-      if (enemies.some((e) => e.state !== 'routing' && dist(e, f) < 450)) continue;
-      const near = mine.filter((o) => dist(o, f) < RULES.supplyAreaRadius);
-      const score = near.reduce((a, o) => a + (100 - o.ammo) + o.fatigue * 0.5, 0) + near.length;
-      if (score > bestScore) { bestScore = score; best = f; }
-    }
-    if (best && (!u.supplyZone || dist(u.supplyZone, best) > 80)) cmds.push({ kind: 'supplyArea', side: this.side, ids: [u.id], x: best.x, y: best.y });
   }
 
   private reinforce(world: World): Command[] {

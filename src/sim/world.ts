@@ -52,7 +52,7 @@ export interface Unit {
   prev: { x: number; y: number; facing: number }; // position at the start of the tick, for smooth drawing
   fireZone: Vec | null; // artillery: the area it is bombarding
   reload: number; // artillery: seconds until the next shell
-  supplyZone: Vec | null; // supply wagons: the area they are resupplying
+  supplyZone: Vec | null; // supply wagons: the area they are sending carts to, picked automatically
   supplyLeft: number; // supply wagons: seconds the last delivered load keeps the area supplied
   cartAt: number; // supply wagons: battle time the next cart can leave
 }
@@ -129,8 +129,7 @@ export type UnitCommand =
   | { kind: 'ceaseFire'; side: Side; ids: number[]; relayed?: boolean }
   | { kind: 'hold'; side: Side; ids: number[]; relayed?: boolean }
   | { kind: 'formation'; side: Side; ids: number[]; formation?: Formation; relayed?: boolean }
-  | { kind: 'build'; side: Side; ids: number[]; relayed?: boolean }
-  | { kind: 'supplyArea'; side: Side; ids: number[]; x: number; y: number; relayed?: boolean };
+  | { kind: 'build'; side: Side; ids: number[]; relayed?: boolean };
 
 export type Command =
   | UnitCommand
@@ -139,7 +138,7 @@ export type Command =
   | { kind: 'ready'; side: Side }
   | { kind: 'resign'; side: Side };
 
-const UNIT_COMMANDS = new Set(['move', 'attack', 'bombard', 'ceaseFire', 'hold', 'formation', 'build', 'supplyArea']);
+const UNIT_COMMANDS = new Set(['move', 'attack', 'bombard', 'ceaseFire', 'hold', 'formation', 'build']);
 
 function commandIds(cmd: UnitCommand): number[] {
   return cmd.kind === 'move' ? cmd.moves.map((m) => m.id) : cmd.ids;
@@ -258,6 +257,8 @@ export class World {
   impacts: Impact[] = [];
   couriers: Courier[] = [];
   carts: Cart[] = [];
+  private lastCaptureLog: [number, number] = [-99, -99];
+  private lastCartLog: [number, number] = [-99, -99];
   rng: Rng;
   private nextId = 1;
   private nextGroup = 1;
@@ -291,7 +292,7 @@ export class World {
       ['line', at(a, 170, -190), first], ['line', at(a, 170, 190), first], ['light', at(a, 300, 0), first],
       ['line', at(b, 170, -190), second], ['line', at(b, 170, 190), second], ['line', at(b, -150, 0), second],
       ['artillery', at(mid, -60, 0)], ['cavalry', at(mid, -320, 0)], ['engineers', at(mid, -200, 120)],
-      ['general', at(mid, -250, -120)], ['supply', at(mid, -420, -200)],
+      ['general', at(mid, -250, -120)], ['supply', at(mid, -420, -200)], ['supply', at(mid, -420, 200)],
     ];
     for (const [type, p, brigade] of spots) {
       const q = clampToMap(p, RULES.borderWidth + 80);
@@ -505,23 +506,7 @@ export class World {
       case 'ceaseFire': {
         for (const id of cmd.ids) {
           const u = own(id);
-          if (u) { u.fireZone = null; u.supplyZone = null; }
-        }
-        break;
-      }
-      case 'supplyArea': {
-        // Wagons never drive up to the area: they halt where they are and serve it if it is in reach.
-        if (this.phase !== 'battle') break;
-        for (const id of cmd.ids) {
-          const u = own(id);
-          if (u?.type !== 'supply') continue;
-          const zone = clampToMap({ x: cmd.x, y: cmd.y });
-          // Moving the area somewhere new means the next cart has to get there first.
-          if (!u.supplyZone || dist(u.supplyZone, zone) > RULES.supplyAreaRadius) u.supplyLeft = 0;
-          u.supplyZone = zone;
-          u.order = { kind: 'hold' };
-          u.waypoints = [];
-          u.marching = false;
+          if (u) u.fireZone = null;
         }
         break;
       }
@@ -637,7 +622,9 @@ export class World {
       const raider = dist(c, u) > 150 && this.units.find((e) => e.side !== c.side && e.type === 'cavalry' && e.state !== 'routing'
         && dist(e, c) <= RULES.courierInterceptRange + unitRadius(e));
       if (raider) {
-        this.log(c.side, `A courier to the ${u.name} was captured`);
+        // One caption at a time, or a raid on the staff would flood the screen.
+        if (this.time - this.lastCaptureLog[c.side] > 15) this.log(c.side, `A courier to the ${u.name} was captured`);
+        this.lastCaptureLog[c.side] = this.time;
         return false;
       }
       const d = dist(c, u);
@@ -927,7 +914,29 @@ export class World {
 
   /** Can this wagon train send carts to its area right now? It must stand still with the area in reach. */
   canSendCarts(w: Unit): boolean {
-    return !!w.supplyZone && w.state !== 'routing' && !w.moving && w.meleeWith === null && dist(w, w.supplyZone) <= RULES.supplyRange;
+    return !!w.supplyZone && w.state !== 'routing' && !w.moving && w.meleeWith === null && dist(w, w.supplyZone) <= RULES.supplyRange + RULES.supplyAreaRadius;
+  }
+
+  /** Wagons supply on their own: carts go to the troops in reach that are shortest of ammunition or most tired. */
+  private pickSupplyArea(w: Unit) {
+    let best: Unit | undefined;
+    let bestNeed = RULES.autoSupplyMinNeed;
+    for (const f of this.units) {
+      if (f.side !== w.side || isSupport(f) || f.state === 'routing' || dist(w, f) > RULES.supplyRange) continue;
+      // Count everyone the area would cover, so carts go where they help the most troops.
+      let need = 0;
+      for (const o of this.units) {
+        if (o.side === w.side && !isSupport(o) && o.state !== 'routing' && dist(o, f) <= RULES.supplyAreaRadius) {
+          need += (100 - o.ammo) + o.fatigue * 0.5;
+        }
+      }
+      if (need > bestNeed) { bestNeed = need; best = f; }
+    }
+    if (!best) return;
+    if (!w.supplyZone || dist(w.supplyZone, best) > RULES.supplyAreaRadius * 0.5) {
+      w.supplyZone = { x: best.x, y: best.y };
+      w.supplyLeft = 0;
+    }
   }
 
   /** Wagon trains send carts to their supply area; enemies in range of a cart on the road shoot it up. */
@@ -935,8 +944,9 @@ export class World {
     for (const w of this.units) {
       if (w.type !== 'supply') continue;
       w.supplyLeft = Math.max(0, w.supplyLeft - DT);
-      if (!w.supplyZone) continue;
       const enRoute = this.carts.some((c) => c.wagon === w.id);
+      if (!enRoute && this.time >= w.cartAt && w.supplyLeft < RULES.cartLead) this.pickSupplyArea(w);
+      if (!w.supplyZone) continue;
       if (!enRoute && this.canSendCarts(w) && this.time >= w.cartAt && w.supplyLeft < RULES.cartLead) {
         this.carts.push({ side: w.side, wagon: w.id, x: w.x, y: w.y, hp: 100, seen: [w.side === 0, w.side === 1] });
         w.cartAt = this.time + RULES.cartInterval;
@@ -952,7 +962,8 @@ export class World {
       }
       for (const i of this.impacts) if (this.time - i.t < DT * 1.5 && dist(i, c) <= RULES.shellBlast) c.hp = 0;
       if (c.hp <= 0) {
-        this.log(c.side, `A supply cart from the ${w.name} was destroyed`);
+        if (this.time - this.lastCartLog[c.side] > 15) this.log(c.side, `A supply cart from the ${w.name} was destroyed`);
+        this.lastCartLog[c.side] = this.time;
         return false;
       }
       const d = dist(c, w.supplyZone);
