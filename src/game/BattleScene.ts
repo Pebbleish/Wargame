@@ -14,7 +14,7 @@ const SIN = Math.sin(VIEW_ROTATION);
 /** A direction on screen, expressed in world coordinates. */
 const screenToWorldDir = (x: number, y: number): Vec => ({ x: x * COS + y * SIN, y: -x * SIN + y * COS });
 const STEP = 1 / RULES.tickRate;
-const SPEEDS = [0.5, 1, 2, 3];
+const SPEEDS = [0.5, 1, 2, 3, 5, 8];
 const COLORS = {
   0: { fill: 0x2b2e38, symbol: 0xe9e1c8, light: 0x8d96b0 },
   1: { fill: 0xd9a92b, symbol: 0x3a2c10, light: 0xf2d27a },
@@ -31,7 +31,8 @@ interface Drag {
 
 export class BattleScene extends Phaser.Scene {
   private world!: World;
-  private ai!: AI;
+  private ais: AI[] = [];
+  private spectating = false; // both armies are AI-controlled and the whole field is visible
   private hud!: Hud;
   private seed = 1;
   private gfx!: Phaser.GameObjects.Graphics;
@@ -77,6 +78,12 @@ export class BattleScene extends Phaser.Scene {
       hold: () => this.world.apply({ kind: 'hold', side: PLAYER, ids: [...this.selected] }),
       formation: (f) => this.world.apply({ kind: 'formation', side: PLAYER, ids: [...this.selected], formation: f }),
       resign: () => this.world.apply({ kind: 'resign', side: PLAYER }),
+      spectate: () => {
+        this.spectating = !this.spectating;
+        this.seed += 1;
+        this.newBattle();
+        this.hud.reset();
+      },
       build: () => this.world.apply({ kind: 'build', side: PLAYER, ids: [...this.selected] }),
       aim: () => { if (this.selectedGuns().length) this.aiming = true; },
       ceaseFire: () => this.world.apply({ kind: 'ceaseFire', side: PLAYER, ids: this.selectedGuns().map((u) => u.id) }),
@@ -92,10 +99,14 @@ export class BattleScene extends Phaser.Scene {
     this.setupInput();
   }
 
+  private canSee(u: Unit): boolean {
+    return this.spectating || u.seen[PLAYER];
+  }
+
   private newBattle() {
     this.world = new World(this.seed);
     this.buildMap();
-    this.ai = new AI(1);
+    this.ais = this.spectating ? [new AI(0), new AI(1)] : [new AI(1)];
     this.selected.clear();
     this.pendingCallIn = null;
     this.acc = 0;
@@ -242,7 +253,7 @@ export class BattleScene extends Phaser.Scene {
       if (k === '+' || k === '=') this.speedIndex = Math.min(SPEEDS.length - 1, this.speedIndex + 1);
       if (k === '-' || k === '_') this.speedIndex = Math.max(0, this.speedIndex - 1);
       if (k === 'escape') { this.pendingCallIn = null; this.aiming = false; this.selected.clear(); }
-      if (k === 'a' && (e.ctrlKey || e.metaKey)) {
+      if (k === 'a' && (e.ctrlKey || e.metaKey) && !this.spectating) {
         e.preventDefault();
         this.selected = new Set(this.world.units.filter((u) => u.side === PLAYER && u.state !== 'routing').map((u) => u.id));
       }
@@ -255,7 +266,7 @@ export class BattleScene extends Phaser.Scene {
     let best: Unit | undefined;
     let bestD = Infinity;
     for (const u of this.world.units) {
-      if (!u.seen[PLAYER]) continue;
+      if (!this.canSee(u)) continue;
       const { w, d } = unitSize(u);
       const dx = p.x - u.x;
       const dy = p.y - u.y;
@@ -274,6 +285,7 @@ export class BattleScene extends Phaser.Scene {
   }
 
   private leftRelease(d: Drag, end: Vec, shift: boolean) {
+    if (this.spectating) return;
     if (this.aiming) {
       this.aiming = false;
       this.world.apply({ kind: 'bombard', side: PLAYER, ids: this.selectedGuns().map((u) => u.id), x: end.x, y: end.y });
@@ -388,7 +400,7 @@ export class BattleScene extends Phaser.Scene {
       this.acc += (Math.min(delta, 250) / 1000) * SPEEDS[this.speedIndex];
       let guard = 0;
       while (this.acc >= STEP && guard++ < 60) {
-        for (const c of this.ai.update(this.world)) this.world.apply(c);
+        for (const ai of this.ais) for (const c of ai.update(this.world)) this.world.apply(c);
         this.world.step();
         this.acc -= STEP;
       }
@@ -406,6 +418,7 @@ export class BattleScene extends Phaser.Scene {
         pendingCallIn: this.pendingCallIn,
         paused: this.paused,
         speed: SPEEDS[this.speedIndex],
+        spectating: this.spectating,
       });
     }
   }
@@ -478,7 +491,7 @@ export class BattleScene extends Phaser.Scene {
       this.zones.fillRect(c.x - 50, c.y - 8, 100, 16);
     }
     for (const u of w.units) {
-      if (u.building <= 0 || !u.seen[PLAYER]) continue;
+      if (u.building <= 0 || !this.canSee(u)) continue;
       const total = u.buildKind === 'pontoon' ? RULES.pontoonTime : RULES.buildTime;
       this.zones.lineStyle(4, 0xfff3cf, 0.9);
       this.zones.beginPath();
@@ -514,7 +527,7 @@ export class BattleScene extends Phaser.Scene {
         const left = c.readyAt - w.time;
         if (left > RULES.arrivalWarning) continue;
         const pos = { x: side === 0 ? 30 : MAP.width - 30, y: c.y };
-        if (side !== PLAYER && !w.units.some((u) => u.side === PLAYER && dist(u, pos) <= UNIT_TYPES[u.type].sight)) continue;
+        if (side !== PLAYER && !this.spectating && !w.units.some((u) => u.side === PLAYER && dist(u, pos) <= UNIT_TYPES[u.type].sight)) continue;
         for (let k = 0; k < 6; k++) {
           const a = (k / 6) * Math.PI * 2 + w.time;
           g.fillStyle(0xb8a27a, 0.25);
@@ -526,7 +539,7 @@ export class BattleScene extends Phaser.Scene {
     // Units.
     // Fire circles of our batteries, and shell bursts anyone can see.
     for (const u of w.units) {
-      if (u.side !== PLAYER || u.type !== 'artillery' || !u.fireZone) continue;
+      if ((u.side !== PLAYER && !this.spectating) || u.type !== 'artillery' || !u.fireZone) continue;
       const inRange = dist(u, u.fireZone) <= UNIT_TYPES.artillery.range;
       const sel = this.selected.has(u.id);
       const col = inRange ? 0xc0392b : 0x8a8170;
@@ -569,7 +582,7 @@ export class BattleScene extends Phaser.Scene {
     const now = w.time;
     const t = this.paused || w.phase !== 'battle' ? 1 : Phaser.Math.Clamp(this.acc / STEP, 0, 1);
     for (const u of w.units) {
-      if (!u.seen[PLAYER]) continue;
+      if (!this.canSee(u)) continue;
       const view = {
         ...u,
         x: u.prev.x + (u.x - u.prev.x) * t,

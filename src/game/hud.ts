@@ -10,6 +10,7 @@ export interface HudHandlers {
   aim(): void;
   ceaseFire(): void;
   restart(): void;
+  spectate(): void;
   resign(): void;
   build(): void;
   pause(): void;
@@ -21,6 +22,7 @@ export interface UiState {
   pendingCallIn: UnitTypeId | null;
   paused: boolean;
   speed: number;
+  spectating: boolean;
 }
 
 const PLAYER = 0;
@@ -55,6 +57,8 @@ export class Hud {
   private captions: HTMLDivElement;
   private cards = new Map<UnitTypeId, HTMLDivElement>();
   private queue: HTMLDivElement;
+  private callins: HTMLDivElement;
+  private spectating = false;
   private selection: HTMLDivElement;
   private deploy: HTMLDivElement;
   private tooltip: HTMLDivElement;
@@ -85,6 +89,7 @@ export class Hud {
 
     const bar = el('div', 'panel');
     bar.id = 'callins';
+    this.callins = bar;
     for (const type of CALLIN_ORDER) {
       const def = UNIT_TYPES[type];
       const card = el('div', 'card', `<div class="t">${def.label}</div><div class="c">${def.cost} manpower · ${def.arrival}s</div><div class="why"></div><div class="cool"></div>`);
@@ -97,12 +102,13 @@ export class Hud {
     this.queue.id = 'queue';
     bar.appendChild(this.queue);
 
-    this.controls.innerHTML = `<button data-a="pause">Pause</button><button data-a="slower">−</button><span class="spd" style="align-self:center;min-width:28px;text-align:center">1×</span><button data-a="faster">+</button><button data-a="help">?</button><button data-a="resign">Resign</button>`;
+    this.controls.innerHTML = `<button data-a="pause">Pause</button><button data-a="slower">−</button><span class="spd" style="align-self:center;min-width:28px;text-align:center">1×</span><button data-a="faster">+</button><button data-a="help">?</button><button data-a="spectate" title="Watch two AI armies fight">Watch AI</button><button data-a="resign">Resign</button>`;
     this.controls.addEventListener('click', (e) => {
       const a = (e.target as HTMLElement).dataset.a;
       if (a === 'pause') this.h.pause();
       if (a === 'slower') this.h.speed(-1);
       if (a === 'faster') this.h.speed(1);
+      if (a === 'spectate') this.h.spectate();
       if (a === 'help') this.help.style.display = this.help.style.display === 'none' ? 'block' : 'none';
       if (a === 'resign') {
         // Two clicks to resign, so a stray click never ends the battle.
@@ -187,7 +193,13 @@ export class Hud {
       ? me.queue.map((c) => `<div>${UNIT_TYPES[c.type].label} in ${Math.ceil(c.readyAt - world.time)}s</div>`).join('')
       : `<div>${world.phase === 'deploy' ? 'Deploying: units appear at once' : 'No troops on the way'}</div>`);
 
-    this.deploy.style.display = world.phase === 'deploy' ? 'block' : 'none';
+    // Watching AI vs AI: nothing to command, so the player's panels are hidden.
+    this.spectating = ui.spectating;
+    this.deploy.style.display = world.phase === 'deploy' && !ui.spectating ? 'block' : 'none';
+    this.callins.style.display = ui.spectating ? 'none' : 'flex';
+    this.economy.style.display = ui.spectating ? 'none' : 'flex';
+    (this.controls.querySelector('[data-a="resign"]') as HTMLElement).style.display = ui.spectating ? 'none' : '';
+    (this.controls.querySelector('[data-a="spectate"]') as HTMLElement).textContent = ui.spectating ? 'Play' : 'Watch AI';
     const readyBtn = this.deploy.querySelector('button') as HTMLButtonElement;
     readyBtn.textContent = me.ready ? 'Waiting…' : 'Start battle';
     readyBtn.disabled = me.ready;
@@ -261,14 +273,16 @@ export class Hud {
     if (world.phase !== 'ended' || !world.result || this.endShown) return;
     this.endShown = true;
     const r = world.result;
-    const title = r.winner === -1 ? 'Draw' : r.winner === PLAYER ? 'Victory' : 'Defeat';
+    const title = r.winner === -1 ? 'Draw'
+      : this.spectating ? `${world.sides[r.winner].nation} wins`
+      : r.winner === PLAYER ? 'Victory' : 'Defeat';
     const [a, b] = world.sides;
     this.end.innerHTML = `<div class="panel"><h2>${title}</h2><p>${r.reason} at ${clock(world.time)}.</p>
       <table><tr><td></td><td><b>${a.nation}</b></td><td><b>${b.nation}</b></td></tr>
       <tr><td>Points</td><td>${a.score.toFixed(0)}</td><td>${b.score.toFixed(0)}</td></tr>
       <tr><td>Men lost</td><td>${Math.round(a.lostMen).toLocaleString()}</td><td>${Math.round(b.lostMen).toLocaleString()}</td></tr>
       <tr><td>Army morale</td><td>${a.armyMorale.toFixed(0)}</td><td>${b.armyMorale.toFixed(0)}</td></tr></table>
-      <button data-a="again">Play again</button></div>`;
+      <button data-a="again">${this.spectating ? 'Watch another' : 'Play again'}</button></div>`;
     this.end.style.display = 'flex';
   }
 
