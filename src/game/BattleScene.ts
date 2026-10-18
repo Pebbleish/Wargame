@@ -1,7 +1,7 @@
 import Phaser from 'phaser';
 import { MAP, RULES, UNIT_TYPES, UnitTypeId } from '../sim/config';
 import { AI } from '../sim/ai';
-import { OBJECTIVES, Vec, dist } from '../sim/map';
+import { CROSSINGS, EARTHWORKS, OBJECTIVES, Vec, dist } from '../sim/map';
 import { Side, Unit, World, formationOf, inZone, unitSize } from '../sim/world';
 import { Hud } from './hud';
 import { paintTerrain } from './terrain';
@@ -69,6 +69,7 @@ export class BattleScene extends Phaser.Scene {
       hold: () => this.world.apply({ kind: 'hold', side: PLAYER, ids: [...this.selected] }),
       formation: (f) => this.world.apply({ kind: 'formation', side: PLAYER, ids: [...this.selected], formation: f }),
       resign: () => this.world.apply({ kind: 'resign', side: PLAYER }),
+      build: () => this.world.apply({ kind: 'build', side: PLAYER, ids: [...this.selected] }),
       aim: () => { if (this.selectedGuns().length) this.aiming = true; },
       ceaseFire: () => this.world.apply({ kind: 'ceaseFire', side: PLAYER, ids: this.selectedGuns().map((u) => u.id) }),
       restart: () => {
@@ -191,6 +192,7 @@ export class BattleScene extends Phaser.Scene {
       const fm = ({ '1': 'marching', '2': 'formation', '3': 'fortified' } as const)[k as '1' | '2' | '3'];
       if (fm) this.world.apply({ kind: 'formation', side: PLAYER, ids: [...this.selected], formation: fm });
       if (k === 'b' && this.selectedGuns().length) this.aiming = true;
+      if (k === 'e') this.world.apply({ kind: 'build', side: PLAYER, ids: [...this.selected] });
       if (k === 'x') this.world.apply({ kind: 'ceaseFire', side: PLAYER, ids: this.selectedGuns().map((u) => u.id) });
       if (k === '+' || k === '=') this.speedIndex = Math.min(SPEEDS.length - 1, this.speedIndex + 1);
       if (k === '-' || k === '_') this.speedIndex = Math.max(0, this.speedIndex - 1);
@@ -392,6 +394,31 @@ export class BattleScene extends Phaser.Scene {
     this.zones.lineBetween(RULES.zoneDepth, 0, RULES.zoneDepth, MAP.height);
     this.zones.lineStyle(3, COLORS[1].fill, 0.35);
     this.zones.lineBetween(MAP.width - RULES.zoneDepth, 0, MAP.width - RULES.zoneDepth, MAP.height);
+
+    // Earthworks and pontoon bridges built by engineers.
+    for (const e of EARTHWORKS) {
+      this.zones.fillStyle(0x8a6d45, 0.35);
+      this.zones.fillCircle(e.x, e.y, e.r);
+      this.zones.lineStyle(10, 0x6b5236, 0.85);
+      this.zones.strokeCircle(e.x, e.y, e.r);
+      this.zones.lineStyle(3, COLORS[e.side].fill, 0.6);
+      this.zones.strokeCircle(e.x, e.y, e.r - 9);
+    }
+    for (const c of CROSSINGS) {
+      if (!c.pontoon) continue;
+      this.zones.fillStyle(0x3b3024, 0.9);
+      for (let k = -2; k <= 2; k++) this.zones.fillEllipse(c.x + k * 18, c.y, 12, 30);
+      this.zones.fillStyle(0xa48b68, 1);
+      this.zones.fillRect(c.x - 50, c.y - 8, 100, 16);
+    }
+    for (const u of w.units) {
+      if (u.building <= 0 || !u.seen[PLAYER]) continue;
+      const total = u.buildKind === 'pontoon' ? RULES.pontoonTime : RULES.buildTime;
+      this.zones.lineStyle(4, 0xfff3cf, 0.9);
+      this.zones.beginPath();
+      this.zones.arc(u.x, u.y, 60, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * (1 - u.building / total));
+      this.zones.strokePath();
+    }
 
     // The impassable border around the map.
     const b = RULES.borderWidth;

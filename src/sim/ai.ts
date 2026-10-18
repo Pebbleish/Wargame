@@ -101,6 +101,14 @@ export class AI {
         if (u.order.kind !== 'attack') cmds.push({ kind: 'attack', side: this.side, ids: [u.id], target: nearest.id });
         continue;
       }
+      // Engineers throw up earthworks at their objective while it is quiet.
+      if (u.type === 'engineers') {
+        if (u.building > 0) continue;
+        if (dist(u, goal) < 250 && nd > 600 && u.order.kind === 'hold' && !world.buildBlocker(u)) {
+          cmds.push({ kind: 'build', side: this.side, ids: [u.id] });
+          continue;
+        }
+      }
       // Dig in when holding an objective under threat, otherwise stay in formation and let long moves march.
       const atGoal = dist(u, goal) < 250;
       const cavThreat = visibleEnemies.some((e) => e.type === 'cavalry' && e.state === 'ok' && dist(e, u) < 300);

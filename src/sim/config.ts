@@ -69,10 +69,12 @@ export const UNIT_SIZE: Record<UnitTypeId, Record<Formation, Size>> = {
 
 export const RULES = {
   tickRate: 10,
-  matchLength: 30 * 60,
-  finalPushAt: 22 * 60,
-  callInCutoff: 25 * 60,
-  deploymentTime: 90,
+  matchLength: 20 * 60,
+  finalPushAt: 14 * 60,
+  callInCutoff: 17 * 60,
+  timePressureAt: 12 * 60, // army morale starts to drain on both sides from here
+  deploymentTime: 60,
+  dominationHold: 60, // holding every objective this long wins outright
 
   startingBudget: 1500,
   stockpileCap: 1200,
@@ -104,6 +106,11 @@ export const RULES = {
   shellInterval: 3.5, // seconds between shells per battery
   shellVsFortified: 1.6, // shells are the answer to dug-in troops
   friendlyFire: 0.5, // share of shell damage your own troops take inside the circle
+
+  buildTime: 20, // engineers: seconds to throw up earthworks
+  pontoonTime: 30, // engineers: seconds to bridge a river
+  maxWorks: 4, // earthworks and pontoon bridges per side
+  engineerAura: 300, // friendly troops this close to engineers dig in twice as fast
 
   woodsSpotRange: 250, // units in woods are only seen by enemies this close
   firingReveals: 5, // seconds a battery stays visible after firing from woods

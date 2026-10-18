@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { MAP, RULES } from '../src/sim/config';
+import { MAP, RULES, UNIT_TYPES } from '../src/sim/config';
+import { EARTHWORKS, OBJECTIVES, RIVER, generateMap, terrainAt } from '../src/sim/map';
 import { AI } from '../src/sim/ai';
 import { World } from '../src/sim/world';
 
@@ -53,5 +54,41 @@ describe('battle simulation', () => {
     w.apply({ kind: 'resign', side: 0 });
     expect(w.phase).toBe('ended');
     expect(w.result?.winner).toBe(1);
+  });
+
+  it('moves artillery into range when the target is too far', () => {
+    const w = new World(1);
+    w.apply({ kind: 'ready', side: 0 });
+    w.apply({ kind: 'ready', side: 1 });
+    const gun = w.units.find((u) => u.side === 0 && u.type === 'artillery')!;
+    w.apply({ kind: 'bombard', side: 0, ids: [gun.id], x: gun.x + 3000, y: gun.y });
+    expect(gun.order.kind).toBe('move');
+    for (let i = 0; i < 4000 && gun.formation !== 'fortified'; i++) w.step();
+    expect(gun.formation).toBe('fortified');
+    expect(Math.hypot(gun.fireZone!.x - gun.x, gun.fireZone!.y - gun.y)).toBeLessThanOrEqual(UNIT_TYPES.artillery.range);
+  });
+
+  it('lets engineers build earthworks', () => {
+    const w = new World(1);
+    w.apply({ kind: 'ready', side: 0 });
+    w.apply({ kind: 'ready', side: 1 });
+    const eng = w.spawn(0, 'engineers', 400, 1500);
+    w.apply({ kind: 'build', side: 0, ids: [eng.id] });
+    for (let i = 0; i < (RULES.buildTime + 1) * RULES.tickRate; i++) w.step();
+    expect(EARTHWORKS.length).toBe(1);
+    expect(terrainAt(eng).cover).toBeLessThan(1);
+  });
+
+  it('generates point-symmetric maps, some without a river', () => {
+    let open = 0;
+    for (let seed = 1; seed <= 20; seed++) {
+      generateMap(seed);
+      if (RIVER.length === 0) open++;
+      for (const o of OBJECTIVES) {
+        const twin = OBJECTIVES.find((p) => Math.abs(p.x - (MAP.width - o.x)) < 1e-6 && Math.abs(p.y - (MAP.height - o.y)) < 1e-6);
+        expect(twin).toBeDefined();
+      }
+    }
+    expect(open).toBeGreaterThan(0);
   });
 });

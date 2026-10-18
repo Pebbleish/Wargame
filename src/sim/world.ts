@@ -2,7 +2,8 @@ import {
   CAVALRY_FORMATION_SPEED, FORMATION, FORMATIONS, Formation, HASTY_FORTIFIED, MAP, RULES, UNIT_SIZE, UNIT_TYPES, UnitTypeId,
 } from './config';
 import {
-  OBJECTIVES, Vec, clampToMap, crossesRiver, dist, generateMap, nearCrossing, planRoute, terrainAt,
+  CROSSINGS, EARTHWORKS, OBJECTIVES, Vec, addEarthwork, addPontoon, clampToMap, crossesRiver, dist, generateMap, nearCrossing,
+  nearestRiverPoint, planRoute, terrainAt,
 } from './map';
 import { Rng } from './rng';
 
@@ -33,6 +34,8 @@ export interface Unit {
   hasty: boolean; // fortified in combat: the weaker version
   holdPosition: boolean; // ordered to hold: will not chase whoever attacks it
   lastAttacker: number | null; // the most recent enemy to hurt this unit
+  building: number; // engineers: seconds of work left on earthworks or a pontoon bridge
+  buildKind: 'earthwork' | 'pontoon' | null;
   digIn: number; // seconds until a fortifying unit is dug in
   edgeTime: number; // seconds a shaken unit has spent pinned against the map border
   underFire: number; // seconds of "recently hit" left
@@ -76,6 +79,7 @@ export interface SideState {
   score: number;
   ready: boolean;
   nameCounters: Record<UnitTypeId, number>;
+  works: number;
 }
 
 export interface GameEvent {
@@ -94,7 +98,8 @@ export type Command =
   | { kind: 'callIn'; side: Side; type: UnitTypeId; x: number; y: number }
   | { kind: 'requisition'; side: Side }
   | { kind: 'ready'; side: Side }
-  | { kind: 'resign'; side: Side };
+  | { kind: 'resign'; side: Side }
+  | { kind: 'build'; side: Side; ids: number[] };
 
 export interface Result {
   winner: Side | -1;
@@ -167,12 +172,14 @@ function newSide(nation: string): SideState {
     score: 0,
     ready: false,
     nameCounters: { ...zero },
+    works: 0,
   };
 }
 
 export class World {
   phase: 'deploy' | 'battle' | 'ended' = 'deploy';
   deployLeft = RULES.deploymentTime;
+  domination: [number, number] = [0, 0]; // seconds each side has held every objective
   time = 0;
   units: Unit[] = [];
   sides: [SideState, SideState];
@@ -230,6 +237,8 @@ export class World {
       hasty: false,
       holdPosition: false,
       lastAttacker: null,
+      building: 0,
+      buildKind: null,
       digIn: 0,
       edgeTime: 0,
       underFire: 0,
@@ -397,6 +406,22 @@ export class World {
         if (this.sides[0].ready && this.sides[1].ready) this.startBattle();
         break;
       }
+      case 'build': {
+        if (this.phase !== 'battle') break;
+        for (const id of cmd.ids) {
+          const u = own(id);
+          if (u?.type !== 'engineers' || u.state === 'routing' || u.building > 0) continue;
+          const why = this.buildBlocker(u);
+          if (why) { this.log(u.side, `${u.name}: ${why}`); continue; }
+          const river = nearestRiverPoint(u);
+          u.buildKind = river && river.d < 140 ? 'pontoon' : 'earthwork';
+          u.building = u.buildKind === 'pontoon' ? RULES.pontoonTime : RULES.buildTime;
+          u.order = { kind: 'hold' };
+          u.waypoints = [];
+          u.marching = false;
+        }
+        break;
+      }
       case 'resign': {
         this.end(cmd.side === 0 ? 1 : 0, `${this.sides[cmd.side].nation} has resigned`);
         break;
@@ -404,9 +429,23 @@ export class World {
     }
   }
 
-  /** Halt a battery where it stands, set up, and shell the given spot. */
+  /**
+   * Shell the given spot. In range, the battery halts and sets up where it stands; out of range,
+   * it moves up until the spot is in range and sets up there.
+   */
   private aimGuns(u: Unit, at: Vec) {
     u.fireZone = { x: at.x, y: at.y };
+    const range = UNIT_TYPES.artillery.range * (terrainAt(u).hill ? 1.2 : 1);
+    const d = dist(u, at);
+    if (d > range) {
+      const stop = UNIT_TYPES.artillery.range * 0.9;
+      const p = clampToMap({ x: at.x + ((u.x - at.x) / d) * stop, y: at.y + ((u.y - at.y) / d) * stop });
+      u.order = { kind: 'move', x: p.x, y: p.y };
+      u.waypoints = planRoute(u, p);
+      u.group = 0;
+      if (u.formation === 'fortified') u.formation = 'formation';
+      return;
+    }
     u.order = { kind: 'hold' };
     u.waypoints = [];
     u.marching = false;
@@ -418,6 +457,18 @@ export class World {
     u.formation = 'fortified';
     u.hasty = this.inCombat(u);
     u.digIn = u.type === 'artillery' ? RULES.artilleryFortifyTime : u.hasty ? RULES.hastyFortifyTime : RULES.fortifyTime;
+  }
+
+  /** Why these engineers cannot start building here, or null if they can. */
+  buildBlocker(u: Unit): string | null {
+    if (this.sides[u.side].works >= RULES.maxWorks) return `Limit of ${RULES.maxWorks} works`;
+    const river = nearestRiverPoint(u);
+    if (river && river.d < 140) {
+      if (CROSSINGS.some((c) => dist(c, river.point) < 200)) return 'Already a crossing here';
+      return null;
+    }
+    if (EARTHWORKS.some((e) => dist(e, u) < 150)) return 'Too close to other works';
+    return null;
   }
 
   inCombat(u: Unit): boolean {
@@ -569,6 +620,7 @@ export class World {
     }
 
     this.retaliate(u);
+    this.build(u);
 
     // Work out where the unit wants to go.
     let goal: Vec | null = null;
@@ -594,7 +646,11 @@ export class World {
       }
     }
 
-    u.digIn = Math.max(0, u.digIn - DT);
+    // Engineers nearby help any unit dig in twice as fast.
+    if (u.digIn > 0) {
+      const helped = this.units.some((e) => e.side === u.side && e.type === 'engineers' && e.state !== 'routing' && dist(e, u) <= RULES.engineerAura);
+      u.digIn = Math.max(0, u.digIn - DT * (helped ? 2 : 1));
+    }
     const wasMarching = u.marching;
     u.marching = this.shouldMarch(u, goal);
     // Coming off a march, troops form up again; a battery with a target sets up to fire.
@@ -631,10 +687,36 @@ export class World {
       return;
     }
     // Holding and fortified units fight back from where they are (they already return fire in range).
-    if (u.holdPosition || u.formation === 'fortified') return;
+    if (u.holdPosition || u.formation === 'fortified' || u.building > 0) return;
     u.order = { kind: 'attack', target: a.id, retaliate: true };
     u.waypoints = planRoute(u, a);
     u.group = 0;
+  }
+
+  /** Engineers at work: moving off cancels the job, melee pauses it, finishing leaves the works behind. */
+  private build(u: Unit) {
+    if (u.building <= 0) return;
+    if (u.order.kind !== 'hold') {
+      u.building = 0;
+      u.buildKind = null;
+      return;
+    }
+    if (u.meleeWith !== null) return;
+    u.building -= DT;
+    if (u.building > 0) return;
+    u.building = 0;
+    const s = this.sides[u.side];
+    if (s.works >= RULES.maxWorks) return;
+    s.works += 1;
+    if (u.buildKind === 'pontoon') {
+      const river = nearestRiverPoint(u);
+      if (river) addPontoon(river.point);
+      this.log(u.side, `${u.name} completes a pontoon bridge`);
+    } else {
+      addEarthwork(u.side, u);
+      this.log(u.side, `${u.name} completes earthworks`);
+    }
+    u.buildKind = null;
   }
 
   /** Out of combat, any move order is marched; the unit forms up again when it arrives or meets the enemy. */
@@ -948,12 +1030,22 @@ export class World {
       const s = this.sides[side];
       const routing = this.units.filter((u) => u.side === side && u.state === 'routing').length;
       const lossFrac = s.lostMen / Math.max(1, s.fieldedMen);
-      const timePressure = this.time > 18 * 60 ? (2 * (this.time - 18 * 60)) / 60 : 0;
+      const timePressure = this.time > RULES.timePressureAt ? (3 * (this.time - RULES.timePressureAt)) / 60 : 0;
       s.armyMorale = Math.max(0, 100 - 60 * lossFrac - 4 * routing - 4 * s.removed - s.objectiveDrain - timePressure);
     }
   }
 
   private checkEnd() {
+    // Domination: holding every objective for long enough wins outright.
+    for (const side of [0, 1] as Side[]) {
+      const held = this.owners.filter((o) => o === side).length;
+      if (held === OBJECTIVES.length) this.domination[side] += DT;
+      else this.domination[side] = 0;
+      if (this.domination[side] >= RULES.dominationHold) {
+        this.end(side, `${this.sides[side].nation} dominates the field`);
+        return;
+      }
+    }
     const broken = this.sides.map((s) => s.armyMorale <= 0);
     if (broken[0] || broken[1]) {
       const winner: Side | -1 = broken[0] && broken[1] ? -1 : broken[0] ? 1 : 0;

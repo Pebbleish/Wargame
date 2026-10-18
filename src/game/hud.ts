@@ -11,6 +11,7 @@ export interface HudHandlers {
   ceaseFire(): void;
   restart(): void;
   resign(): void;
+  build(): void;
   pause(): void;
   speed(delta: number): void;
 }
@@ -118,7 +119,7 @@ export class Hud {
 
     this.help.innerHTML = `
       <h3>How to play</h3>
-      <p>Hold more objectives and break the enemy army's morale before 30:00.</p>
+      <p>Break the enemy army's morale, hold every objective for ${RULES.dominationHold}s, or lead on points when the ${RULES.matchLength / 60}-minute clock runs out.</p>
       <p><kbd>Left-click</kbd> select · <kbd>drag</kbd> box select · <kbd>Shift</kbd> add<br>
       <kbd>Right-click</kbd> move, or attack an enemy<br>
       <kbd>Right-drag</kbd> form a line along the drag<br>
@@ -127,6 +128,7 @@ export class Hud {
       <kbd>Space</kbd> pause · <kbd>+</kbd>/<kbd>−</kbd> speed<br>
       <kbd>WASD</kbd> or arrows pan · wheel zoom</p>
       <p><b>Marching</b> is fastest but fights badly; troops march automatically on any move out of combat and form up when they arrive. <b>Formation</b> is the fighting stance. <b>Fortified</b> barely moves but takes less damage and loses morale more slowly: dug in properly out of combat (${RULES.fortifyTime}s), or a weaker hasty position if already fighting. Shells hit fortified troops harder.</p>
+      <p>Engineers (<kbd>E</kbd>) build earthworks that give cover like a village, or a pontoon bridge when standing at a river (up to ${RULES.maxWorks} per side). Troops near engineers dig in twice as fast.</p>
       <p>Artillery stops and sets up when you give it a target, and only fires once set up. Units in woods are hidden unless your troops are within ${RULES.woodsSpotRange}m; firing guns give themselves away.</p>
       <p>Call in troops from the bar at the bottom, then click inside your deployment zone (the shaded strip on the left). They march in from the map edge.</p>
       <p><button data-a="close">Got it</button></p>`;
@@ -136,7 +138,7 @@ export class Hud {
 
     this.economy.innerHTML = `<span class="mp"></span><button data-a="req" title="+${RULES.requisitionAmount} manpower once, costs ${RULES.requisitionMoraleCost} army morale">Requisition</button><span class="cap" style="color:var(--muted)"></span>`;
     this.deploy.innerHTML = `<div class="h">Deploy your army</div><div style="margin:4px 0 8px;color:var(--muted)">Right-click to reposition regiments inside your zone. Spend your budget on extra troops.</div><button data-a="ready">Start battle</button>`;
-    this.selection.innerHTML = `<div class="info"></div><div class="btns"><button data-a="hold">Hold (H)</button></div><div class="btns fm"><button data-a="fm-marching">March (1)</button><button data-a="fm-formation">Formation (2)</button><button data-a="fm-fortified">Fortify (3)</button></div><div class="btns guns"><button data-a="aim">Aim fire (B)</button><button data-a="cease">Cease fire (X)</button></div>`;
+    this.selection.innerHTML = `<div class="info"></div><div class="btns"><button data-a="hold">Hold (H)</button></div><div class="btns fm"><button data-a="fm-marching">March (1)</button><button data-a="fm-formation">Formation (2)</button><button data-a="fm-fortified">Fortify (3)</button></div><div class="btns guns"><button data-a="aim">Aim fire (B)</button><button data-a="cease">Cease fire (X)</button></div><div class="btns eng"><button data-a="build">Build works (E)</button></div>`;
     this.economy.addEventListener('click', (e) => {
       if ((e.target as HTMLElement).dataset.a === 'req') this.h.requisition();
     });
@@ -148,6 +150,7 @@ export class Hud {
       if (a === 'hold') this.h.hold();
       if (a?.startsWith('fm-')) this.h.formation(a.slice(3) as Formation);
       if (a === 'aim') this.h.aim();
+      if (a === 'build') this.h.build();
       if (a === 'cease') this.h.ceaseFire();
     });
     this.end.addEventListener('click', (e) => {
@@ -208,6 +211,7 @@ export class Hud {
       (this.selection.querySelector(`[data-a="fm-${f}"]`) as HTMLElement).classList.toggle('on', sel.every((u) => u.formation === f));
     }
     (this.selection.querySelector('.guns') as HTMLElement).style.display = sel.some((u) => u.type === 'artillery') ? 'flex' : 'none';
+    (this.selection.querySelector('.eng') as HTMLElement).style.display = sel.some((u) => u.type === 'engineers') ? 'flex' : 'none';
     const info = this.selection.querySelector('.info') as HTMLElement;
     if (sel.length === 1) {
       const u = sel[0];
@@ -228,6 +232,7 @@ export class Hud {
   }
 
   private formationText(u: Unit): string {
+    if (u.building > 0) return `${u.buildKind === 'pontoon' ? 'Bridging' : 'Building works'} ${Math.ceil(u.building)}s`;
     if (u.marching) return 'Marching (auto)';
     if (u.formation === 'fortified' && formationOf(u) !== 'fortified') return u.type === 'artillery' ? 'Setting up guns…' : 'Digging in…';
     if (u.formation === 'fortified' && u.hasty) return 'Fortified (hasty)';

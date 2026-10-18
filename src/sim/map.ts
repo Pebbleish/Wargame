@@ -15,7 +15,9 @@ export interface ObjectiveDef {
 
 export interface Circle { x: number; y: number; r: number }
 
-export interface Crossing { x: number; y: number; name: string; ford: boolean }
+export interface Crossing { x: number; y: number; name: string; ford: boolean; pontoon?: boolean }
+
+export interface Earthwork extends Circle { side: 0 | 1 }
 
 // The battlefield is laid out on a 3200 x 2000 sketch and scaled up to the real map size.
 // A fresh layout is generated for every battle. It is always point-symmetric around the centre
@@ -36,6 +38,10 @@ export const OBJECTIVES: ObjectiveDef[] = [];
 export const WOODS: Circle[] = [];
 export const HILLS: Circle[] = [];
 export const ROADS: Vec[][] = [];
+export const MARSHES: Circle[] = [];
+// Built during the battle by engineers.
+export const EARTHWORKS: Earthwork[] = [];
+export const EARTHWORK_RADIUS = 90;
 
 const VILLAGE_NAMES = ['Westbrook', 'Kessel', 'Hollin', 'Marrau', 'Dornach', 'Aschfeld', 'Felden', 'Brackwitz', 'Ulmen', 'Sorau'];
 const DEPOT_NAMES = ['Linden Depot', 'Ostrava Depot', 'Gorse Depot', 'Halden Depot', 'Pellau Depot', 'Rothen Depot'];
@@ -52,69 +58,124 @@ function replace<T>(target: T[], items: T[]) {
   target.splice(0, target.length, ...items);
 }
 
+export type MapKind = 'river' | 'open';
+export let mapKind: MapKind = 'river';
+
 /** Lay out a new battlefield from a seed. The same seed always gives the same map. */
 export function generateMap(seed: number) {
   const rng = new Rng(seed * 7919 + 17);
+  const names = new Set<string>();
+  replace(EARTHWORKS, []);
+  mapKind = rng.next() < 0.25 ? 'open' : 'river';
+  const centre = v(1600, 1000);
 
   // River: wanders from the north edge to the centre; the southern half is the mirror image.
-  const north = [v(1600 + rng.range(-140, 140), 0), v(1600 + rng.range(-110, 110), rng.range(220, 320)), v(1600 + rng.range(-90, 90), rng.range(560, 680))];
-  const centre = v(1600, 1000);
-  replace(RIVER, [...north, centre, ...north.slice().reverse().map(mirror)]);
+  // It has a bridge in the middle and one or two more bridges or fords on each half.
+  let crossingsNorth: Crossing[] = [];
+  if (mapKind === 'river') {
+    const north = [0, 210, 420, 630, 830].map((y, i) => v(1600 + rng.range(-150, 150) * (1 - i * 0.15), i === 0 ? 0 : y + rng.range(-50, 50)));
+    replace(RIVER, [...north, centre, ...north.slice().reverse().map(mirror)]);
+    const spots = [1, 2, 3].sort(() => rng.next() - 0.5).slice(0, 1 + Math.floor(rng.next() * 2)).sort();
+    crossingsNorth = spots.map((i, k) => {
+      const ford = rng.next() < 0.6;
+      return { ...north[i], name: `${ford ? 'Ford' : 'Bridge'} ${k + 1}`, ford };
+    });
+  } else {
+    replace(RIVER, []);
+  }
+  const centreName = mapKind === 'river' ? pick(rng, BRIDGE_NAMES, names) : pick(rng, VILLAGE_NAMES, names);
+  replace(CROSSINGS, mapKind === 'river' ? [
+    ...crossingsNorth,
+    { ...centre, name: centreName, ford: false },
+    ...crossingsNorth.map((c) => ({ ...c, ...mirror(c) })),
+  ] : []);
 
-  // Crossings: the bridge in the middle, and a ford or second bridge to the north and south.
-  const names = new Set<string>();
-  const bridgeName = pick(rng, BRIDGE_NAMES, names);
-  const upperFord = rng.next() < 0.75;
-  const upper = rng.next() < 0.5 ? north[1] : north[2];
-  replace(CROSSINGS, [
-    { ...upper, name: upperFord ? 'North ford' : 'North bridge', ford: upperFord },
-    { ...centre, name: bridgeName, ford: false },
-    { ...mirror(upper), name: upperFord ? 'South ford' : 'South bridge', ford: upperFord },
-  ]);
-
-  // Objectives: a village and a depot on each bank, in mirrored spots, plus the bridge.
-  const a = v(rng.range(900, 1250), rng.range(330, 720));
-  const b = v(rng.range(900, 1250), rng.range(1280, 1670));
-  const villageFirst = rng.next() < 0.5;
-  const kindA: ObjectiveKind = villageFirst ? 'village' : 'depot';
-  const kindB: ObjectiveKind = villageFirst ? 'depot' : 'village';
+  // Objectives: two on each side in mirrored spots, plus the centre (a bridge, or a village on open maps).
+  const a = v(rng.range(850, 1300), rng.range(250, 760));
+  const b = v(rng.range(850, 1300), rng.range(1240, 1750));
+  const kind = (): ObjectiveKind => (rng.next() < 0.5 ? 'village' : 'depot');
+  const kindA = kind();
+  const kindB = rng.next() < 0.7 ? (kindA === 'village' ? 'depot' : 'village') : kindA;
   const label = (k: ObjectiveKind) => pick(rng, k === 'village' ? VILLAGE_NAMES : DEPOT_NAMES, names);
   replace(OBJECTIVES, [
     { id: 0, name: label(kindA), kind: kindA, ...a },
     { id: 1, name: label(kindB), kind: kindB, ...b },
-    { id: 2, name: bridgeName, kind: 'bridge', ...centre },
+    { id: 2, name: centreName, kind: mapKind === 'river' ? 'bridge' : 'village', ...centre },
     { id: 3, name: label(kindB), kind: kindB, ...mirror(b) },
     { id: 4, name: label(kindA), kind: kindA, ...mirror(a) },
   ]);
 
-  // Roads join the objectives through the crossings and run back to both map edges.
-  const north3 = OBJECTIVES[3];
+  // Roads join the objectives through the centre and run back to both map edges, with side roads
+  // over the other crossings (or straight across on open maps).
+  const northObj = OBJECTIVES[3];
+  const upper = crossingsNorth[0];
   replace(ROADS, [
     [{ x: 0, y: a.y }, a, centre, mirror(a), { x: MAP.width, y: MAP.height - a.y }],
     [{ x: 0, y: b.y }, b, centre, mirror(b), { x: MAP.width, y: MAP.height - b.y }],
-    [a, upper, north3],
-    [b, mirror(upper), mirror(a)],
+    upper ? [a, upper, northObj] : [a, northObj],
+    upper ? [b, mirror(upper), mirror(a)] : [b, mirror(a)],
   ]);
 
-  // Woods and hills, scattered on the west half and mirrored, kept clear of objectives and crossings.
+  // Hills, woods and marshes, scattered on the west half and mirrored, clear of objectives and crossings.
+  replace(HILLS, []);
+  replace(WOODS, []);
+  replace(MARSHES, []);
   const clear = (p: Circle) =>
-    p.x > 450 * S && p.x < 1500 * S &&
+    p.x > 450 * S && p.x < 1520 * S &&
     OBJECTIVES.every((o) => dist(p, o) > p.r + VILLAGE_RADIUS + 60) &&
     CROSSINGS.every((k) => dist(p, k) > p.r + 120) &&
-    [...WOODS, ...HILLS].every((o) => dist(p, o) > p.r + o.r + 40);
+    [...WOODS, ...HILLS, ...MARSHES].every((o) => dist(p, o) > p.r + o.r + 40);
   const scatter = (count: number, minR: number, maxR: number, into: Circle[]) => {
     const placed: Circle[] = [];
-    for (let tries = 0; placed.length < count && tries < 200; tries++) {
-      const p = c(rng.range(350, 1500), rng.range(150, 1850), rng.range(minR, maxR));
+    for (let tries = 0; placed.length < count && tries < 300; tries++) {
+      const p = c(rng.range(350, 1520), rng.range(150, 1850), rng.range(minR, maxR));
       if (!clear(p) || dist(p, mirror(p)) < p.r * 2 + 80) continue;
       placed.push(p);
       into.push(p, { ...mirror(p), r: p.r });
     }
   };
-  replace(HILLS, []);
-  replace(WOODS, []);
-  scatter(1 + Math.floor(rng.next() * 2), 150, 220, HILLS);
-  scatter(3 + Math.floor(rng.next() * 3), 80, 140, WOODS);
+  scatter(Math.floor(rng.next() * 4), 140, 230, HILLS);
+  scatter(2 + Math.floor(rng.next() * 5), 70, 140, WOODS);
+  // Give each wood an irregular outline: extra lobes of trees around its core, mirrored like the rest.
+  const cores = WOODS.filter((_, i) => i % 2 === 0);
+  for (const core of cores) {
+    const lobes = 2 + Math.floor(rng.next() * 4);
+    let heading = rng.range(0, Math.PI * 2);
+    for (let k = 0; k < lobes; k++) {
+      heading += rng.range(-1.2, 1.2);
+      const r = core.r * rng.range(0.45, 0.85);
+      const d = core.r * rng.range(0.6, 1.1);
+      const lobe = { x: core.x + Math.cos(heading) * d, y: core.y + Math.sin(heading) * d, r };
+      if (OBJECTIVES.some((o) => dist(lobe, o) < r + VILLAGE_RADIUS + 30) || CROSSINGS.some((k2) => dist(lobe, k2) < r + 90)) continue;
+      if (lobe.x < 400 * S || lobe.x > MAP.width / 2 - r) continue;
+      WOODS.push(lobe, { ...mirror(lobe), r });
+    }
+  }
+  scatter(Math.floor(rng.next() * 3), 90, 150, MARSHES);
+}
+
+export function addEarthwork(side: 0 | 1, p: Vec) {
+  EARTHWORKS.push({ x: p.x, y: p.y, r: EARTHWORK_RADIUS, side });
+}
+
+/** The closest point on the river to p, or null on maps without one. */
+export function nearestRiverPoint(p: Vec): { point: Vec; d: number } | null {
+  let best: { point: Vec; d: number } | null = null;
+  for (let i = 0; i < RIVER.length - 1; i++) {
+    const a = RIVER[i];
+    const b = RIVER[i + 1];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / (dx * dx + dy * dy || 1)));
+    const q = { x: a.x + t * dx, y: a.y + t * dy };
+    const d = dist(p, q);
+    if (!best || d < best.d) best = { point: q, d };
+  }
+  return best;
+}
+
+export function addPontoon(p: Vec) {
+  CROSSINGS.push({ x: p.x, y: p.y, name: 'Pontoon bridge', ford: false, pontoon: true });
 }
 
 generateMap(1);
@@ -155,6 +216,8 @@ export interface Terrain {
   hill: boolean;
   woods: boolean;
   village: boolean;
+  marsh: boolean;
+  works: boolean;
 }
 
 export function terrainAt(p: Vec): Terrain {
@@ -163,14 +226,18 @@ export function terrainAt(p: Vec): Terrain {
   const village = OBJECTIVES.some((o) => o.kind !== 'bridge' && dist(p, o) <= VILLAGE_RADIUS);
   const road = ROADS.some((r) => distToPolyline(p, r) <= ROAD_HALF_WIDTH);
   const crossing = nearCrossing(p);
+  const marsh = inCircles(p, MARSHES);
+  const works = inCircles(p, EARTHWORKS);
   let cover = 1;
   let speed = 1;
   if (woods) { cover = 0.5; speed = 0.6; }
   if (village) { cover = 0.5; speed = Math.min(speed, 0.8); }
   if (hill) { cover = Math.min(cover, 0.8); speed *= 0.85; }
+  if (marsh) speed *= 0.5;
+  if (works) cover = Math.min(cover, 0.5);
   if (road) speed = Math.max(speed, 1.35);
   if (crossing?.ford) speed = 0.5;
-  return { cover, speed, road, hill, woods, village };
+  return { cover, speed, road, hill, woods, village, marsh, works };
 }
 
 function segmentsIntersect(a: Vec, b: Vec, c: Vec, d: Vec): boolean {

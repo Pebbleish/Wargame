@@ -1,6 +1,6 @@
 import { MAP } from '../sim/config';
 import {
-  CROSSINGS, HILLS, OBJECTIVES, RIVER, RIVER_WIDTH, ROADS, VILLAGE_RADIUS, Vec, WOODS,
+  CROSSINGS, HILLS, MARSHES, OBJECTIVES, RIVER, RIVER_WIDTH, ROADS, VILLAGE_RADIUS, Vec, WOODS,
 } from '../sim/map';
 import { Rng } from '../sim/rng';
 
@@ -74,6 +74,39 @@ export function paintTerrain(): HTMLCanvasElement {
     }
   }
 
+  // Marshes: dark wet ground with pools and reed tufts.
+  for (const m of MARSHES) {
+    const grad = g.createRadialGradient(m.x, m.y, m.r * 0.2, m.x, m.y, m.r);
+    grad.addColorStop(0, 'rgba(70,90,70,0.45)');
+    grad.addColorStop(0.8, 'rgba(80,95,65,0.3)');
+    grad.addColorStop(1, 'rgba(80,95,65,0)');
+    g.fillStyle = grad;
+    g.beginPath();
+    g.arc(m.x, m.y, m.r, 0, Math.PI * 2);
+    g.fill();
+    for (let k = 0; k < 10; k++) {
+      const a = rng.range(0, Math.PI * 2);
+      const d = Math.sqrt(rng.next()) * m.r * 0.75;
+      g.fillStyle = 'rgba(90,130,150,0.45)';
+      g.beginPath();
+      g.ellipse(m.x + Math.cos(a) * d, m.y + Math.sin(a) * d, rng.range(10, 26), rng.range(5, 12), rng.range(0, 3), 0, Math.PI * 2);
+      g.fill();
+    }
+    g.strokeStyle = 'rgba(50,60,30,0.55)';
+    g.lineWidth = 2;
+    for (let k = 0; k < 60; k++) {
+      const a = rng.range(0, Math.PI * 2);
+      const d = Math.sqrt(rng.next()) * m.r * 0.9;
+      const x = m.x + Math.cos(a) * d;
+      const y = m.y + Math.sin(a) * d;
+      g.beginPath();
+      g.moveTo(x - 4, y); g.lineTo(x - 6, y - 9);
+      g.moveTo(x, y); g.lineTo(x, y - 11);
+      g.moveTo(x + 4, y); g.lineTo(x + 6, y - 9);
+      g.stroke();
+    }
+  }
+
   // Roads.
   const strokeLine = (pts: Vec[], width: number, color: string) => {
     g.strokeStyle = color;
@@ -87,11 +120,13 @@ export function paintTerrain(): HTMLCanvasElement {
   for (const r of ROADS) strokeLine(r, 18, 'rgba(120,100,62,0.55)');
   for (const r of ROADS) strokeLine(r, 11, '#c8b489');
 
-  // River with soft banks.
+  // River with soft banks (some maps have none).
+  if (RIVER.length) {
   strokeLine(RIVER, RIVER_WIDTH + 26, 'rgba(70,85,45,0.35)');
   strokeLine(RIVER, RIVER_WIDTH + 6, '#4f84ad');
   strokeLine(RIVER, RIVER_WIDTH - 12, '#6aa3cc');
   strokeLine(RIVER, 6, 'rgba(190,225,245,0.5)');
+  }
 
   // Bridge and fords.
   for (const c of CROSSINGS) {
@@ -116,13 +151,16 @@ export function paintTerrain(): HTMLCanvasElement {
   }
 
   // Woods: clusters of small painted trees with shadows.
-  for (const w of WOODS) {
+  // Woods are made of overlapping lobes; each lobe skips the ground an earlier lobe already covered.
+  WOODS.forEach((w, wi) => {
     const count = Math.floor((w.r * w.r) / 140);
     const trees: Vec[] = [];
     for (let i = 0; i < count; i++) {
       const a = rng.range(0, Math.PI * 2);
       const d = Math.sqrt(rng.next()) * w.r;
-      trees.push({ x: w.x + Math.cos(a) * d, y: w.y + Math.sin(a) * d });
+      const t = { x: w.x + Math.cos(a) * d, y: w.y + Math.sin(a) * d };
+      if (WOODS.slice(0, wi).some((o) => Math.hypot(t.x - o.x, t.y - o.y) < o.r)) continue;
+      trees.push(t);
     }
     trees.sort((a, b) => a.y - b.y);
     for (const t of trees) {
@@ -142,7 +180,7 @@ export function paintTerrain(): HTMLCanvasElement {
       g.arc(t.x - r * 0.3, t.y - r * 0.35, r * 0.45, 0, Math.PI * 2);
       g.fill();
     }
-  }
+  });
 
   // Villages and supply depots: red-roofed houses clustered along the roads.
   for (const o of OBJECTIVES) {
