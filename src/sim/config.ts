@@ -114,9 +114,7 @@ export const RULES = {
   rallyAtNearGeneral: 20, // routed troops reaching the general rally sooner
   generalRallyBoost: 3, // and get their nerve back this many times faster
 
-  commandRadius: 600, // regiments this close to the general get orders at once and steadier morale
-  courierSpeed: 100, // orders to regiments outside the command radius are carried by a rider
-  courierInterceptRange: 80, // enemy cavalry this close to a rider captures the order
+  commandRadius: 600, // regiments this close to the general have steadier morale
   commandMoraleTaken: 0.85, // morale loss multiplier inside the command radius
   commandMoraleRecovery: 1.5, // morale recovery multiplier inside the command radius
   generalLossMorale: 15, // army morale lost for good when the general falls

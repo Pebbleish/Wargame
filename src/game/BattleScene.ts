@@ -569,7 +569,7 @@ export class BattleScene extends Phaser.Scene {
       }
     }
 
-    // The general's command radius: orders reach regiments inside it at once.
+    // The general's command radius: regiments inside it hold their nerve better.
     for (const side of [0, 1] as Side[]) {
       if (side !== PLAYER && !this.spectating) continue;
       const gen = w.general(side);
@@ -587,20 +587,6 @@ export class BattleScene extends Phaser.Scene {
       g.fillRect(c.x - 13, c.y - 8, 26, 16);
       g.fillStyle(COLORS[c.side].fill, 1);
       g.fillRect(c.x - 13, c.y - 8, 26 * (c.hp / 100), 5);
-    }
-
-    // Couriers riding out with orders.
-    for (const c of w.couriers) {
-      if (!this.spectating && !c.seen[PLAYER]) continue;
-      const target = w.unit(c.unit);
-      if (target && (c.side === PLAYER || this.spectating)) {
-        g.lineStyle(2, 0xfffaf0, 0.35);
-        g.lineBetween(c.x, c.y, target.x, target.y);
-      }
-      g.fillStyle(0x1d1b16, 0.9);
-      g.fillCircle(c.x, c.y, 11);
-      g.fillStyle(COLORS[c.side].fill, 1);
-      g.fillCircle(c.x, c.y, 8);
     }
 
     for (const i of w.impacts) {

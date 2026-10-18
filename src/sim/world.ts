@@ -63,16 +63,6 @@ export interface Impact {
   t: number;
 }
 
-/** A rider carrying orders to a regiment outside the general's command radius. */
-export interface Courier {
-  side: Side;
-  unit: number;
-  cmds: UnitCommand[];
-  x: number;
-  y: number;
-  seen: [boolean, boolean];
-}
-
 /** A cart of ammunition on its way from the wagon train to its supply area. It can be shot up on the road. */
 export interface Cart {
   side: Side;
@@ -121,35 +111,18 @@ export interface GameEvent {
   text: string;
 }
 
-// Orders to regiments. Outside the command radius they travel by courier; `relayed` marks one that has arrived.
-export type UnitCommand =
-  | { kind: 'move'; side: Side; moves: { id: number; x: number; y: number }[]; facing?: number; group?: number; relayed?: boolean }
-  | { kind: 'attack'; side: Side; ids: number[]; target: number; relayed?: boolean }
-  | { kind: 'bombard'; side: Side; ids: number[]; x: number; y: number; relayed?: boolean }
-  | { kind: 'ceaseFire'; side: Side; ids: number[]; relayed?: boolean }
-  | { kind: 'hold'; side: Side; ids: number[]; relayed?: boolean }
-  | { kind: 'formation'; side: Side; ids: number[]; formation?: Formation; relayed?: boolean }
-  | { kind: 'build'; side: Side; ids: number[]; relayed?: boolean };
-
 export type Command =
-  | UnitCommand
+  | { kind: 'move'; side: Side; moves: { id: number; x: number; y: number }[]; facing?: number }
+  | { kind: 'attack'; side: Side; ids: number[]; target: number }
+  | { kind: 'bombard'; side: Side; ids: number[]; x: number; y: number }
+  | { kind: 'ceaseFire'; side: Side; ids: number[] }
+  | { kind: 'hold'; side: Side; ids: number[] }
+  | { kind: 'formation'; side: Side; ids: number[]; formation?: Formation }
+  | { kind: 'build'; side: Side; ids: number[] }
   | { kind: 'callIn'; side: Side; type: UnitTypeId; x: number; y: number }
   | { kind: 'requisition'; side: Side }
   | { kind: 'ready'; side: Side }
   | { kind: 'resign'; side: Side };
-
-const UNIT_COMMANDS = new Set(['move', 'attack', 'bombard', 'ceaseFire', 'hold', 'formation', 'build']);
-
-function commandIds(cmd: UnitCommand): number[] {
-  return cmd.kind === 'move' ? cmd.moves.map((m) => m.id) : cmd.ids;
-}
-
-/** The same order, addressed only to some of its regiments. */
-function commandFor(cmd: UnitCommand, ids: number[]): UnitCommand {
-  return cmd.kind === 'move'
-    ? { ...cmd, moves: cmd.moves.filter((m) => ids.includes(m.id)) }
-    : { ...cmd, ids: cmd.ids.filter((id) => ids.includes(id)) };
-}
 
 export interface Result {
   winner: Side | -1;
@@ -255,9 +228,7 @@ export class World {
   events: GameEvent[] = [];
   result: Result | null = null;
   impacts: Impact[] = [];
-  couriers: Courier[] = [];
   carts: Cart[] = [];
-  private lastCaptureLog: [number, number] = [-99, -99];
   private lastCartLog: [number, number] = [-99, -99];
   rng: Rng;
   private nextId = 1;
@@ -332,21 +303,10 @@ export class World {
     return this.units.find((u) => u.side === side && u.type === 'general');
   }
 
-  /** Inside the general's command radius orders arrive at once. Without a general, only troops in the deployment zone do. */
+  /** Regiments inside the general's command radius hold their nerve better. */
   inCommand(u: Vec & { side: Side }): boolean {
     const g = this.general(u.side);
-    return g ? dist(g, u) <= RULES.commandRadius : inZone(u.side, u);
-  }
-
-  /** Where couriers ride out from: the general, or the rear once the general has fallen. */
-  private commandPost(side: Side, near: Vec): Vec {
-    const g = this.general(side);
-    if (g) return { x: g.x, y: g.y };
-    return { x: side === 0 ? RULES.zoneStart + RULES.zoneDepth / 2 : MAP.width - RULES.zoneStart - RULES.zoneDepth / 2, y: near.y };
-  }
-
-  hasCourier(id: number): boolean {
-    return this.couriers.some((c) => c.unit === id);
+    return !!g && dist(g, u) <= RULES.commandRadius;
   }
 
   /** During deployment, regiments can be placed in the deployment strip or around their home towns. */
@@ -448,16 +408,13 @@ export class World {
 
   apply(cmd: Command) {
     if (this.phase === 'ended') return;
-    if (UNIT_COMMANDS.has(cmd.kind) && this.phase === 'battle' && !(cmd as UnitCommand).relayed) {
-      cmd = this.relay(cmd as UnitCommand);
-    }
     const own = (id: number) => {
       const u = this.unit(id);
       return u && u.side === cmd.side && u.state !== 'routing' ? u : undefined;
     };
     switch (cmd.kind) {
       case 'move': {
-        const group = cmd.group ?? (cmd.moves.length > 1 ? this.nextGroup++ : 0);
+        const group = cmd.moves.length > 1 ? this.nextGroup++ : 0;
         for (const m of cmd.moves) {
           const u = own(m.id);
           if (!u) continue;
@@ -591,57 +548,6 @@ export class World {
   }
 
   /**
-   * Regiments inside the command radius get the order now; the rest get it when a courier reaches them.
-   * Returns the part of the order to carry out at once.
-   */
-  private relay(cmd: UnitCommand): UnitCommand {
-    const ids = commandIds(cmd);
-    if (cmd.kind === 'move' && cmd.group === undefined && cmd.moves.length > 1) cmd = { ...cmd, group: this.nextGroup++ };
-    const now: number[] = [];
-    for (const id of ids) {
-      const u = this.unit(id);
-      if (!u || u.side !== cmd.side || this.inCommand(u)) { now.push(id); continue; }
-      const order = { ...commandFor(cmd, [id]), relayed: true } as UnitCommand;
-      const riding = this.couriers.find((c) => c.unit === id);
-      if (riding) riding.cmds.push(order);
-      else {
-        const from = this.commandPost(cmd.side, u);
-        this.couriers.push({ side: cmd.side, unit: id, cmds: [order], x: from.x, y: from.y, seen: [cmd.side === 0, cmd.side === 1] });
-      }
-    }
-    return commandFor(cmd, now);
-  }
-
-  /** Riders gallop to their regiment; enemy cavalry that gets close takes the dispatch. */
-  private updateCouriers() {
-    const step = RULES.courierSpeed * DT;
-    this.couriers = this.couriers.filter((c) => {
-      const u = this.unit(c.unit);
-      if (!u || u.state === 'routing') return false;
-      // Riders are only caught on the open road, not once they reach their regiment's lines.
-      const raider = dist(c, u) > 150 && this.units.find((e) => e.side !== c.side && e.type === 'cavalry' && e.state !== 'routing'
-        && dist(e, c) <= RULES.courierInterceptRange + unitRadius(e));
-      if (raider) {
-        // One caption at a time, or a raid on the staff would flood the screen.
-        if (this.time - this.lastCaptureLog[c.side] > 15) this.log(c.side, `A courier to the ${u.name} was captured`);
-        this.lastCaptureLog[c.side] = this.time;
-        return false;
-      }
-      const d = dist(c, u);
-      if (d <= step + unitRadius(u)) {
-        for (const order of c.cmds) this.apply(order);
-        return false;
-      }
-      c.x += ((u.x - c.x) / d) * step;
-      c.y += ((u.y - c.y) / d) * step;
-      for (const side of [0, 1] as Side[]) {
-        c.seen[side] = c.side === side || this.units.some((o) => o.side === side && dist(o, c) <= UNIT_TYPES[o.type].sight);
-      }
-      return true;
-    });
-  }
-
-  /**
    * Shell the given spot. In range, the battery halts and sets up where it stands; out of range,
    * it moves up until the spot is in range and sets up there.
    */
@@ -721,7 +627,6 @@ export class World {
     }
     this.updateGroupSpeeds();
     this.updateVisibility();
-    this.updateCouriers();
     this.updateSupply();
     this.economy();
     this.arrivals();

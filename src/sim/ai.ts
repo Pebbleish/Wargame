@@ -70,8 +70,7 @@ export class AI {
     }
 
     for (const u of mine) {
-      // An order already on its way by courier is not repeated.
-      if (u.meleeWith !== null || world.hasCourier(u.id)) continue;
+      if (u.meleeWith !== null) continue;
       const nearest = this.nearest(u, visibleEnemies);
       const nd = nearest ? dist(u, nearest) : Infinity;
 
