@@ -46,7 +46,7 @@ export const UNIT_TYPES: Record<UnitTypeId, UnitTypeDef> = {
   },
   // The army commander and staff: never called in, one per army.
   general: {
-    id: 'general', label: 'Army HQ', men: 120, speed: 11, range: 0, lethality: 0,
+    id: 'general', label: 'Army HQ', men: 120, speed: 14, range: 0, lethality: 0,
     shock: 0.4, sight: 1200, cost: 0, arrival: 0, cooldown: 0,
   },
 };
@@ -89,10 +89,13 @@ export const EXPERIENCE: Record<Experience, { xp: number; fire: number; morale: 
 
 export const RULES = {
   tickRate: 10,
-  matchLength: 20 * 60,
-  finalPushAt: 14 * 60,
-  callInCutoff: 17 * 60,
-  timePressureAt: 10 * 60, // army morale starts to drain on both sides from here
+  matchLength: 15 * 60,
+  finalPushAt: 10 * 60,
+  callInCutoff: 12.5 * 60,
+  timePressureAt: 7 * 60, // army morale starts to drain on both sides from here
+  timePressureRate: 6, // army morale per minute
+  routingMorale: 4, // army morale lost for each regiment currently routing
+  removedMorale: 3.5, // army morale lost for each regiment destroyed or deserted
   deploymentTime: 60,
   dominationHold: 60, // holding every objective this long wins outright
 
@@ -123,7 +126,7 @@ export const RULES = {
   // Fatigue (0 fresh to 100 exhausted), points per second.
   fatigueMarch: 0.15,
   fatigueMove: 0.3,
-  fatigueCharge: 1.2,
+  fatigueCharge: 0.6,
   fatigueMelee: 1.5,
   fatigueFiring: 0.25,
   fatigueRest: 0.8,
@@ -132,8 +135,8 @@ export const RULES = {
   fatigueMeleeLoss: 0.4, // share of melee strength lost when exhausted
 
   // Ammunition (100 = full), points per second of firing.
-  ammoUse: 0.5,
-  shellAmmo: 1.5, // per shell
+  ammoUse: 0.85, // a regiment firing flat out runs dry in about two minutes
+  shellAmmo: 3, // per shell
   lowAmmo: 25, // below this, fire is halved
   resupplyRate: 2, // per second inside a wagon train's supply area (half that at depots and in the deployment zone)
   supplyRange: 900, // wagons send carts to troops this far away, without driving there themselves
@@ -179,7 +182,8 @@ export const RULES = {
 
   captureRadius: 160,
   borderWidth: 40, // impassable strip around the map edge
-  edgeDisperseTime: 30, // wavering or routing units pinned at the border this long disperse
+  edgeDisperseTime: 60, // routing units pinned at the border this long disperse
+  edgeRallyBoost: 2, // routed units that reach the border get their nerve back this many times faster
   townDeployRadius: 450, // starting regiments can be repositioned this close to their home towns
   zoneStart: 0, // distance of each deployment strip from its own map edge
   zoneDepth: 700, // depth of each deployment strip

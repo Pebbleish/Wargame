@@ -95,8 +95,9 @@ export function generateMap(seed: number) {
   ] : []);
 
   // Objectives: two on each side in mirrored spots, plus the centre (a bridge, or a village on open maps).
-  const a = v(rng.range(850, 1300), rng.range(250, 760));
-  const b = v(rng.range(850, 1300), rng.range(1240, 1750));
+  // Home towns sit well back, so the armies have a march to make before they meet.
+  const a = v(rng.range(650, 1000), rng.range(250, 760));
+  const b = v(rng.range(650, 1000), rng.range(1240, 1750));
   const kind = (): ObjectiveKind => (rng.next() < 0.5 ? 'village' : 'depot');
   const kindA = kind();
   const kindB = rng.next() < 0.7 ? (kindA === 'village' ? 'depot' : 'village') : kindA;

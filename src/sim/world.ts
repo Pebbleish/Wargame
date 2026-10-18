@@ -778,6 +778,11 @@ export class World {
     if (wasMarching && !u.marching && u.formation === 'fortified') u.formation = 'formation';
     if (u.type === 'artillery' && u.fireZone && !goal && !u.marching && u.formation !== 'fortified') this.fortify(u);
     u.moving = false;
+    // The general's staff can always gallop clear of a fight.
+    if (goal && u.type === 'general' && u.order.kind === 'move' && u.meleeWith !== null) {
+      for (const e of enemies) if (e.meleeWith === u.id) e.meleeWith = null;
+      u.meleeWith = null;
+    }
     if (goal && u.meleeWith === null) this.moveToward(u, goal, enemies, target);
     // Leaving prepared positions gives up the fortification.
     if (u.moving && u.formation === 'fortified') u.formation = 'formation';
@@ -1051,7 +1056,7 @@ export class World {
     let taken = this.stats(t).fireTaken;
     if (t.type === 'cavalry') taken *= 1.1;
     if (t.type === 'light' && f !== 'marching') taken *= 0.6; // skirmishers are spread out
-    if (t.type === 'general') taken *= 0.3; // a handful of riders is a hard target
+    if (t.type === 'general') taken *= 0.2; // a handful of riders is a hard target
     return taken;
   }
 
@@ -1200,7 +1205,8 @@ export class World {
     u.y = next.y;
     u.moving = true;
     const threat = enemies.some((e) => e.state !== 'routing' && dist(e, u) < RULES.rallySafeDistance);
-    if (!threat) u.morale += 1.5 * (nearGeneral ? RULES.generalRallyBoost : 1) * DT;
+    const atEdge = u.edgeTime > 0;
+    if (!threat) u.morale += 1.5 * (nearGeneral ? RULES.generalRallyBoost : atEdge ? RULES.edgeRallyBoost : 1) * DT;
     if (u.routs === 1 && !threat && u.morale >= (nearGeneral ? RULES.rallyAtNearGeneral : RULES.rallyAt)) {
       u.state = 'wavering';
       u.order = { kind: 'hold' };
@@ -1241,7 +1247,7 @@ export class World {
       u.x = Math.max(m, Math.min(MAP.width - m, u.x));
       u.y = Math.max(m, Math.min(MAP.height - m, u.y));
       const nearEdge = u.x <= m + 60 || u.x >= MAP.width - m - 60 || u.y <= m + 60 || u.y >= MAP.height - m - 60;
-      if (nearEdge && u.state !== 'ok') u.edgeTime += DT;
+      if (nearEdge && u.state === 'routing') u.edgeTime += DT;
       else u.edgeTime = Math.max(0, u.edgeTime - DT * 2);
     }
   }
@@ -1296,8 +1302,8 @@ export class World {
       const s = this.sides[side];
       const routing = this.units.filter((u) => u.side === side && u.state === 'routing').length;
       const lossFrac = s.lostMen / Math.max(1, s.fieldedMen);
-      const timePressure = this.time > RULES.timePressureAt ? (4 * (this.time - RULES.timePressureAt)) / 60 : 0;
-      s.armyMorale = Math.max(0, 100 - 60 * lossFrac - 4 * routing - 4 * s.removed - s.objectiveDrain - timePressure);
+      const timePressure = this.time > RULES.timePressureAt ? (RULES.timePressureRate * (this.time - RULES.timePressureAt)) / 60 : 0;
+      s.armyMorale = Math.max(0, 100 - 60 * lossFrac - RULES.routingMorale * routing - RULES.removedMorale * s.removed - s.objectiveDrain - timePressure);
     }
   }
 

@@ -1,6 +1,6 @@
 import { MAP, RULES, UNIT_TYPES, UnitTypeId } from './config';
 import { OBJECTIVES, Vec, clampToMap, dist } from './map';
-import { Command, Side, Unit, World, formationOf } from './world';
+import { Command, Side, Unit, World, formationOf, isSupport } from './world';
 
 /**
  * A simple layered AI: it decides which objectives each regiment should go for,
@@ -54,8 +54,13 @@ export class AI {
     const needs = this.needs(world);
 
     // Greedy assignment: each regiment takes the nearest objective that still needs troops.
+    // Regiments left over once every objective is covered join the attack on the hottest objective, from a flank.
     const assigned = new Map<number, Vec>();
-    const infantry = mine.filter((u) => u.type === 'line' || u.type === 'light' || u.type === 'engineers');
+    const spare = new Set<number>();
+    const hot = this.hotObjective(world, visibleEnemies);
+    const infantry = mine.filter((u) => u.type === 'line' || u.type === 'light');
+    // Engineers dig in at the held objective nearest the front that the enemy is not already at.
+    for (const u of mine.filter((m) => m.type === 'engineers')) assigned.set(u.id, this.worksSite(world, u, visibleEnemies));
     for (const u of infantry.sort((a, b) => a.id - b.id)) {
       let best = -1;
       let bestScore = Infinity;
@@ -64,7 +69,12 @@ export class AI {
         const score = dist(u, n.pos) - n.need * 150;
         if (score < bestScore) { bestScore = score; best = i; }
       });
-      if (best === -1) best = OBJECTIVES.findIndex((o) => o.centre);
+      if (best === -1) {
+        const side = this.slot(u.id) % 2 ? 1 : -1;
+        assigned.set(u.id, clampToMap({ x: hot.x - this.dir() * 150, y: hot.y + this.dir() * side * 350 }, RULES.borderWidth + 100));
+        spare.add(u.id);
+        continue;
+      }
       needs[best].need -= 1;
       assigned.set(u.id, needs[best].pos);
     }
@@ -77,17 +87,18 @@ export class AI {
       // The general rides behind the centre of the line; the wagons follow further back.
       if (u.type === 'general' || u.type === 'supply') {
         const anchor = this.frontAnchor(mine);
-        const back = u.type === 'general' ? 350 : 550;
+        const back = u.type === 'general' ? 450 : 550;
         const p = { x: anchor.x - this.dir() * back, y: anchor.y + (u.type === 'supply' ? this.dir() * 150 : 0) };
         // Pull back when the enemy gets close.
-        if (nd < 600) p.x = u.x - this.dir() * 400;
+        const horse = visibleEnemies.some((e) => e.type === 'cavalry' && e.state !== 'routing' && dist(e, u) < 1000);
+        if (nd < 700 || horse) p.x = u.x - this.dir() * 400;
         this.moveIfFar(cmds, u, clampToMap(p, RULES.borderWidth + 80), 200);
         continue;
       }
 
       if (u.type === 'cavalry') {
         const prey = visibleEnemies
-          .filter((e) => dist(u, e) < 800 && formationOf(e) !== 'fortified' && (e.state !== 'ok' || e.type === 'artillery' || e.type === 'light' || e.type === 'general' || e.type === 'supply'))
+          .filter((e) => dist(u, e) < 800 && formationOf(e) !== 'fortified' && (e.state !== 'ok' || e.type === 'artillery' || e.type === 'light' || e.type === 'supply' || (e.type === 'general' && dist(u, e) < 450)))
           .sort((a, b) => dist(u, a) - dist(u, b))[0];
         if (prey) {
           if (u.order.kind !== 'attack' || u.order.target !== prey.id) cmds.push({ kind: 'attack', side: this.side, ids: [u.id], target: prey.id });
@@ -106,6 +117,23 @@ export class AI {
       }
 
       const goal = assigned.get(u.id)!;
+      // Light infantry works round the flank of whoever our line is fighting.
+      if (u.type === 'light' && u.building <= 0) {
+        const flank = this.flankSpot(u, mine, visibleEnemies);
+        if (flank) {
+          if (u.formation !== 'formation') cmds.push({ kind: 'formation', side: this.side, ids: [u.id], formation: 'formation' });
+          if (!(nd < UNIT_TYPES.light.range * 0.9 && u.order.kind === 'hold')) this.moveIfFar(cmds, u, flank, 80);
+          continue;
+        }
+      }
+      // Spare regiments press home on enemies near the hot objective.
+      const odds = nearest ? mine.filter((m) => !isSupport(m) && dist(m, nearest) < 500).length
+        - visibleEnemies.filter((e) => e.state !== 'routing' && dist(e, nearest) < 500).length : 0;
+      if (spare.has(u.id) && nearest && nd < 600 && nearest.state !== 'routing' && formationOf(nearest) !== 'fortified' && u.morale > 70 && odds >= 2) {
+        if (u.formation !== 'formation') cmds.push({ kind: 'formation', side: this.side, ids: [u.id], formation: 'formation' });
+        if (u.order.kind !== 'attack') cmds.push({ kind: 'attack', side: this.side, ids: [u.id], target: nearest.id });
+        continue;
+      }
       const enemyWeak = nearest && nd < 380 && (nearest.state !== 'ok' || (u.morale > 65 && nearest.morale < u.morale - 20));
       if (u.type === 'line' && enemyWeak && nearest) {
         if (u.formation !== 'formation') cmds.push({ kind: 'formation', side: this.side, ids: [u.id], formation: 'formation' });
@@ -115,7 +143,7 @@ export class AI {
       // Engineers throw up earthworks at their objective while it is quiet.
       if (u.type === 'engineers') {
         if (u.building > 0) continue;
-        if (dist(u, goal) < 250 && nd > 600 && u.order.kind === 'hold' && !world.buildBlocker(u)) {
+        if (dist(u, goal) < 300 && nd > 400 && !u.moving && !world.buildBlocker(u)) {
           cmds.push({ kind: 'build', side: this.side, ids: [u.id] });
           continue;
         }
@@ -132,6 +160,49 @@ export class AI {
       this.moveIfFar(cmds, u, spot, 90);
     }
     return cmds;
+  }
+
+  /** Where engineers should build: a held objective with no enemy close, nearest the hot spot. */
+  private worksSite(world: World, u: Unit, enemies: Unit[]): Vec {
+    const hot = this.hotObjective(world, enemies);
+    let best: Vec | undefined;
+    let bd = Infinity;
+    OBJECTIVES.forEach((o, i) => {
+      if (world.owners[i] !== this.side || enemies.some((e) => e.state !== 'routing' && dist(e, o) < 600)) return;
+      const d = dist(o, hot) + dist(o, u) * 0.3;
+      if (d < bd) { bd = d; best = o; }
+    });
+    return best ?? world.homeTowns(this.side)[this.slot(u.id) % 2];
+  }
+
+  /** The objective where the fight is: the one with most enemies near it that we do not hold, else the centre. */
+  private hotObjective(world: World, enemies: Unit[]): Vec {
+    let best: Vec = OBJECTIVES.find((o) => o.centre)!;
+    let bestScore = 0;
+    OBJECTIVES.forEach((o, i) => {
+      const near = enemies.filter((e) => e.state !== 'routing' && dist(e, o) < 700).length;
+      const score = near + (world.owners[i] === this.side ? 0 : 1);
+      if (near > 0 && score > bestScore) { bestScore = score; best = o; }
+    });
+    return best;
+  }
+
+  /** A firing spot off the flank of an enemy that our troops are already engaging, if there is one nearby. */
+  private flankSpot(u: Unit, mine: Unit[], enemies: Unit[]): Vec | null {
+    let target: Unit | undefined;
+    let bd = 1000;
+    for (const e of enemies) {
+      if (e.state === 'routing' || isSupport(e)) continue;
+      const engaged = mine.some((m) => m.id !== u.id && m.type !== 'light' && dist(m, e) < 400);
+      const d = dist(u, e);
+      if (engaged && d < bd) { bd = d; target = e; }
+    }
+    if (!target) return null;
+    // Stand off to the side the enemy is not facing, at musket range.
+    const across = { x: -Math.sin(target.facing), y: Math.cos(target.facing) };
+    const sign = (u.x - target.x) * across.x + (u.y - target.y) * across.y >= 0 ? 1 : -1;
+    const r = UNIT_TYPES.light.range * 0.8;
+    return clampToMap({ x: target.x + across.x * sign * r, y: target.y + across.y * sign * r }, RULES.borderWidth + 80);
   }
 
   /** Re-aim a battery's fire circle at the densest enemy group in range, away from our own troops. */

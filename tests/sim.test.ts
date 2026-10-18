@@ -17,7 +17,7 @@ function playOut(seed: number) {
 }
 
 describe('battle simulation', () => {
-  it('always ends by the 30 minute cap', () => {
+  it('always ends by the time cap', () => {
     for (const seed of [1, 2, 3]) {
       const w = playOut(seed);
       expect(w.phase).toBe('ended');
