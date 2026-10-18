@@ -181,6 +181,7 @@ export const RULES = {
   firingReveals: 5, // seconds a battery stays visible after firing from woods
 
   captureRadius: 160,
+  garrisonThreat: 1500, // the AI leaves a town it holds empty unless enemies are this close
   borderWidth: 40, // impassable strip around the map edge
   edgeDisperseTime: 60, // routing units pinned at the border this long disperse
   edgeRallyBoost: 2, // routed units that reach the border get their nerve back this many times faster

@@ -41,7 +41,11 @@ export class AI {
       const enemyNear = world.units.filter((u) => u.side !== this.side && u.seen[this.side] && u.state !== 'routing' && dist(u, o) < 600).length;
       const owned = world.owners[i] === this.side;
       let need = o.kind === 'bridge' ? 3 : 2;
-      if (owned && enemyNear === 0) need = 1;
+      if (owned && enemyNear === 0) {
+        // A town we hold is only garrisoned while the enemy is within striking distance of it.
+        const threat = world.units.some((u) => u.side !== this.side && u.seen[this.side] && u.state !== 'routing' && dist(u, o) < RULES.garrisonThreat);
+        need = threat ? 1 : 0;
+      }
       need += Math.min(2, enemyNear);
       return { pos: { x: o.x, y: o.y }, need };
     });
