@@ -74,38 +74,52 @@ export function paintTerrain(): HTMLCanvasElement {
     }
   }
 
-  // Marshes: dark wet ground with pools and reed tufts.
-  for (const m of MARSHES) {
-    const grad = g.createRadialGradient(m.x, m.y, m.r * 0.2, m.x, m.y, m.r);
-    grad.addColorStop(0, 'rgba(70,90,70,0.45)');
-    grad.addColorStop(0.8, 'rgba(80,95,65,0.3)');
-    grad.addColorStop(1, 'rgba(80,95,65,0)');
-    g.fillStyle = grad;
-    g.beginPath();
-    g.arc(m.x, m.y, m.r, 0, Math.PI * 2);
-    g.fill();
-    for (let k = 0; k < 10; k++) {
+  // Marshes: dark wet ground with pools and reed tufts. The lobes are painted as one soft-edged
+  // shape on a separate layer so overlaps do not darken.
+  if (MARSHES.length) {
+    const layer = document.createElement('canvas');
+    layer.width = MAP.width;
+    layer.height = MAP.height;
+    const m = layer.getContext('2d')!;
+    m.filter = 'blur(18px)';
+    m.fillStyle = 'rgb(72,92,68)';
+    for (const c of MARSHES) {
+      m.beginPath();
+      m.arc(c.x, c.y, c.r * 0.92, 0, Math.PI * 2);
+      m.fill();
+    }
+    g.globalAlpha = 0.45;
+    g.drawImage(layer, 0, 0);
+    g.globalAlpha = 1;
+  }
+  MARSHES.forEach((c, ci) => {
+    const fresh = (x: number, y: number) => !MARSHES.slice(0, ci).some((o) => Math.hypot(x - o.x, y - o.y) < o.r);
+    for (let k = 0; k < Math.ceil((c.r * c.r) / 2000); k++) {
       const a = rng.range(0, Math.PI * 2);
-      const d = Math.sqrt(rng.next()) * m.r * 0.75;
+      const d = Math.sqrt(rng.next()) * c.r * 0.75;
+      const x = c.x + Math.cos(a) * d;
+      const y = c.y + Math.sin(a) * d;
+      if (!fresh(x, y)) continue;
       g.fillStyle = 'rgba(90,130,150,0.45)';
       g.beginPath();
-      g.ellipse(m.x + Math.cos(a) * d, m.y + Math.sin(a) * d, rng.range(10, 26), rng.range(5, 12), rng.range(0, 3), 0, Math.PI * 2);
+      g.ellipse(x, y, rng.range(10, 26), rng.range(5, 12), rng.range(0, 3), 0, Math.PI * 2);
       g.fill();
     }
     g.strokeStyle = 'rgba(50,60,30,0.55)';
     g.lineWidth = 2;
-    for (let k = 0; k < 60; k++) {
+    for (let k = 0; k < Math.ceil((c.r * c.r) / 330); k++) {
       const a = rng.range(0, Math.PI * 2);
-      const d = Math.sqrt(rng.next()) * m.r * 0.9;
-      const x = m.x + Math.cos(a) * d;
-      const y = m.y + Math.sin(a) * d;
+      const d = Math.sqrt(rng.next()) * c.r * 0.9;
+      const x = c.x + Math.cos(a) * d;
+      const y = c.y + Math.sin(a) * d;
+      if (!fresh(x, y)) continue;
       g.beginPath();
       g.moveTo(x - 4, y); g.lineTo(x - 6, y - 9);
       g.moveTo(x, y); g.lineTo(x, y - 11);
       g.moveTo(x + 4, y); g.lineTo(x + 6, y - 9);
       g.stroke();
     }
-  }
+  });
 
   // Roads.
   const strokeLine = (pts: Vec[], width: number, color: string) => {

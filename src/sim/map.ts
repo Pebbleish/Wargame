@@ -161,22 +161,27 @@ export function generateMap(seed: number) {
   // How wooded the map is varies from a few copses to thick forest.
   const woodland = [[0, 2], [2, 4], [3, 6], [6, 10]][Math.floor(rng.next() * 4)];
   scatter(woodland[0] + Math.floor(rng.next() * (woodland[1] - woodland[0] + 1)), 70, 150, WOODS);
-  // Give each wood an irregular outline: extra lobes of trees around its core, mirrored like the rest.
-  const cores = WOODS.filter((_, i) => i % 2 === 0);
-  for (const core of cores) {
-    const lobes = 2 + Math.floor(rng.next() * 4);
-    let heading = rng.range(0, Math.PI * 2);
-    for (let k = 0; k < lobes; k++) {
-      heading += rng.range(-1.2, 1.2);
-      const r = core.r * rng.range(0.45, 0.85);
-      const d = core.r * rng.range(0.6, 1.1);
-      const lobe = { x: core.x + Math.cos(heading) * d, y: core.y + Math.sin(heading) * d, r };
-      if (OBJECTIVES.some((o) => dist(lobe, o) < r + VILLAGE_RADIUS + 30) || CROSSINGS.some((k2) => dist(lobe, k2) < r + 90)) continue;
-      if (lobe.x < 600 * S - TRIM || lobe.x > MAP.width / 2 - r) continue;
-      WOODS.push(lobe, { ...mirror(lobe), r });
+  // Give each wood an irregular outline: extra lobes around its core, mirrored like the rest.
+  const addLobes = (list: Circle[], min: number, max: number) => {
+    const cores = list.filter((_, i) => i % 2 === 0);
+    for (const core of cores) {
+      const lobes = min + Math.floor(rng.next() * (max - min + 1));
+      let heading = rng.range(0, Math.PI * 2);
+      for (let k = 0; k < lobes; k++) {
+        heading += rng.range(-1.2, 1.2);
+        const r = core.r * rng.range(0.45, 0.85);
+        const d = core.r * rng.range(0.6, 1.1);
+        const lobe = { x: core.x + Math.cos(heading) * d, y: core.y + Math.sin(heading) * d, r };
+        if (OBJECTIVES.some((o) => dist(lobe, o) < r + VILLAGE_RADIUS + 30) || CROSSINGS.some((k2) => dist(lobe, k2) < r + 90)) continue;
+        if (lobe.x < 600 * S - TRIM || lobe.x > MAP.width / 2 - r) continue;
+        list.push(lobe, { ...mirror(lobe), r });
+      }
     }
-  }
-  scatter(Math.floor(rng.next() * 3), 90, 150, MARSHES);
+  };
+  addLobes(WOODS, 2, 5);
+  // Marshes vary too: none to several, each a spread of boggy lobes rather than a neat circle.
+  scatter(Math.floor(rng.next() * 4), 70, 140, MARSHES);
+  addLobes(MARSHES, 1, 4);
 }
 
 export function addEarthwork(side: 0 | 1, p: Vec) {

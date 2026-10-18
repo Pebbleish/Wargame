@@ -216,7 +216,7 @@ export class World {
     const spots: [UnitTypeId, Vec][] = [
       ['line', at(a, 170, -190)], ['line', at(a, 170, 190)], ['light', at(a, 300, 0)],
       ['line', at(b, 170, -190)], ['line', at(b, 170, 190)], ['line', at(b, -150, 0)],
-      ['artillery', at(mid, -60, 0)], ['cavalry', at(mid, -320, 0)],
+      ['artillery', at(mid, -60, 0)], ['cavalry', at(mid, -320, 0)], ['engineers', at(mid, -200, 120)],
     ];
     for (const [type, p] of spots) {
       const q = clampToMap(p, RULES.borderWidth + 80);
@@ -947,17 +947,19 @@ export class World {
   }
 
   private updateRouting(u: Unit, enemies: Unit[]) {
-    const edge = homeEdgeX(u.side);
-    const goal = { x: edge, y: u.y };
+    // Run for the nearest map edge that is not the enemy's side: home, or either flank.
+    const exits = [{ x: homeEdgeX(u.side), y: u.y }, { x: u.x, y: 0 }, { x: u.x, y: MAP.height }];
+    const goal = exits.reduce((a, b) => (dist(u, b) < dist(u, a) ? b : a));
     const desired = Math.atan2(goal.y - u.y, goal.x - u.x);
     u.facing = desired;
     const step = this.speedOf(u) * DT;
-    const next = { x: u.x + Math.cos(desired) * step, y: u.y };
+    const next = { x: u.x + Math.cos(desired) * step, y: u.y + Math.sin(desired) * step };
     if (crossesRiver(u, next) && !nearCrossing(u) && !nearCrossing(next)) {
       // Routing troops swim for it, losing men on the way.
       this.damage(u, u.men * 0.01 * DT, u, 0);
     }
     u.x = next.x;
+    u.y = next.y;
     u.moving = true;
     const threat = enemies.some((e) => e.state !== 'routing' && dist(e, u) < RULES.rallySafeDistance);
     if (!threat) u.morale += 1.5 * DT;
