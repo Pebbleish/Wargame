@@ -2,7 +2,7 @@ import Phaser from 'phaser';
 import { MAP, RULES, UNIT_TYPES, UnitTypeId } from '../sim/config';
 import { AI } from '../sim/ai';
 import { CROSSINGS, EARTHWORKS, OBJECTIVES, Vec, dist } from '../sim/map';
-import { Side, Unit, World, formationOf, inZone, unitSize } from '../sim/world';
+import { Side, Unit, World, experienceOf, formationOf, inZone, isSupport, unitSize } from '../sim/world';
 import { Hud } from './hud';
 import { paintTerrain } from './terrain';
 
@@ -85,8 +85,8 @@ export class BattleScene extends Phaser.Scene {
         this.hud.reset();
       },
       build: () => this.world.apply({ kind: 'build', side: PLAYER, ids: [...this.selected] }),
-      aim: () => { if (this.selectedGuns().length) this.aiming = true; },
-      ceaseFire: () => this.world.apply({ kind: 'ceaseFire', side: PLAYER, ids: this.selectedGuns().map((u) => u.id) }),
+      aim: () => { if (this.selectedAimers().length) this.aiming = true; },
+      ceaseFire: () => this.world.apply({ kind: 'ceaseFire', side: PLAYER, ids: this.selectedAimers().map((u) => u.id) }),
       restart: () => {
         this.seed += 1;
         this.newBattle();
@@ -247,9 +247,9 @@ export class BattleScene extends Phaser.Scene {
       if (k === 'f') this.world.apply({ kind: 'formation', side: PLAYER, ids: [...this.selected] });
       const fm = ({ '1': 'marching', '2': 'formation', '3': 'fortified' } as const)[k as '1' | '2' | '3'];
       if (fm) this.world.apply({ kind: 'formation', side: PLAYER, ids: [...this.selected], formation: fm });
-      if (k === 'b' && this.selectedGuns().length) this.aiming = true;
+      if (k === 'b' && this.selectedAimers().length) this.aiming = true;
       if (k === 'e') this.world.apply({ kind: 'build', side: PLAYER, ids: [...this.selected] });
-      if (k === 'x') this.world.apply({ kind: 'ceaseFire', side: PLAYER, ids: this.selectedGuns().map((u) => u.id) });
+      if (k === 'x') this.world.apply({ kind: 'ceaseFire', side: PLAYER, ids: this.selectedAimers().map((u) => u.id) });
       if (k === '+' || k === '=') this.speedIndex = Math.min(SPEEDS.length - 1, this.speedIndex + 1);
       if (k === '-' || k === '_') this.speedIndex = Math.max(0, this.speedIndex - 1);
       if (k === 'escape') { this.pendingCallIn = null; this.aiming = false; this.selected.clear(); }
@@ -284,11 +284,23 @@ export class BattleScene extends Phaser.Scene {
     return this.selectedUnits().filter((u) => u.type === 'artillery');
   }
 
+  private selectedWagons(): Unit[] {
+    return this.selectedUnits().filter((u) => u.type === 'supply');
+  }
+
+  /** Units that work on an area you place: batteries (fire circle) and supply wagons (supply area). */
+  private selectedAimers(): Unit[] {
+    return [...this.selectedGuns(), ...this.selectedWagons()];
+  }
+
   private leftRelease(d: Drag, end: Vec, shift: boolean) {
     if (this.spectating) return;
     if (this.aiming) {
       this.aiming = false;
-      this.world.apply({ kind: 'bombard', side: PLAYER, ids: this.selectedGuns().map((u) => u.id), x: end.x, y: end.y });
+      const guns = this.selectedGuns().map((u) => u.id);
+      const wagons = this.selectedWagons().map((u) => u.id);
+      if (guns.length) this.world.apply({ kind: 'bombard', side: PLAYER, ids: guns, x: end.x, y: end.y });
+      if (wagons.length) this.world.apply({ kind: 'supplyArea', side: PLAYER, ids: wagons, x: end.x, y: end.y });
       return;
     }
     if (this.pendingCallIn) {
@@ -304,10 +316,9 @@ export class BattleScene extends Phaser.Scene {
       if (u && u.side === PLAYER) {
         const now = this.time.now;
         if (this.lastClick.id === u.id && now - this.lastClick.t < 350) {
-          // Double-click: every regiment of that type currently on screen.
-          const view = this.cameras.main.worldView;
+          // Double-click: the regiment's whole brigade.
           this.selected = new Set(this.world.units
-            .filter((o) => o.side === PLAYER && o.type === u.type && view.contains(o.x, o.y))
+            .filter((o) => o.side === PLAYER && o.brigade === u.brigade && o.state !== 'routing')
             .map((o) => o.id));
         } else {
           if (!shift) this.selected.clear();
@@ -552,6 +563,56 @@ export class BattleScene extends Phaser.Scene {
         g.lineBetween(u.x, u.y, u.fireZone.x, u.fireZone.y);
       }
     }
+    // Supply areas of our wagon trains: green while served, grey when the wagons are moving or out of reach.
+    for (const u of w.units) {
+      if ((u.side !== PLAYER && !this.spectating) || u.type !== 'supply' || !u.supplyZone) continue;
+      const active = w.supplyActive(u);
+      const sel = this.selected.has(u.id);
+      const col = active ? 0x4f9d4a : 0x8a8170;
+      g.lineStyle(sel ? 5 : 3, col, sel ? 0.9 : 0.55);
+      g.strokeCircle(u.supplyZone.x, u.supplyZone.y, RULES.supplyAreaRadius);
+      g.fillStyle(col, 0.08);
+      g.fillCircle(u.supplyZone.x, u.supplyZone.y, RULES.supplyAreaRadius);
+      if (sel || active) {
+        g.lineStyle(2, col, sel ? 0.6 : 0.3);
+        g.lineBetween(u.x, u.y, u.supplyZone.x, u.supplyZone.y);
+      }
+    }
+
+    // The general's command radius: orders reach regiments inside it at once.
+    for (const side of [0, 1] as Side[]) {
+      if (side !== PLAYER && !this.spectating) continue;
+      const gen = w.general(side);
+      if (!gen) continue;
+      g.lineStyle(3, COLORS[side].fill, 0.35);
+      g.strokeCircle(gen.x, gen.y, RULES.commandRadius);
+    }
+
+    // Supply carts on the road to their area.
+    for (const c of w.carts) {
+      if (!this.spectating && !c.seen[PLAYER]) continue;
+      g.fillStyle(0x1d1b16, 0.9);
+      g.fillRect(c.x - 16, c.y - 11, 32, 22);
+      g.fillStyle(0x8a6d45, 1);
+      g.fillRect(c.x - 13, c.y - 8, 26, 16);
+      g.fillStyle(COLORS[c.side].fill, 1);
+      g.fillRect(c.x - 13, c.y - 8, 26 * (c.hp / 100), 5);
+    }
+
+    // Couriers riding out with orders.
+    for (const c of w.couriers) {
+      if (!this.spectating && !c.seen[PLAYER]) continue;
+      const target = w.unit(c.unit);
+      if (target && (c.side === PLAYER || this.spectating)) {
+        g.lineStyle(2, 0xfffaf0, 0.35);
+        g.lineBetween(c.x, c.y, target.x, target.y);
+      }
+      g.fillStyle(0x1d1b16, 0.9);
+      g.fillCircle(c.x, c.y, 11);
+      g.fillStyle(COLORS[c.side].fill, 1);
+      g.fillCircle(c.x, c.y, 8);
+    }
+
     for (const i of w.impacts) {
       const age = w.time - i.t;
       const blast = RULES.shellBlast;
@@ -634,9 +695,20 @@ export class BattleScene extends Phaser.Scene {
         o.lineStyle(2, 0xfffaf0, 0.5);
         o.strokeCircle(u.x, u.y, UNIT_TYPES.artillery.range);
       }
-      const ok = this.selectedGuns().some((u) => dist(u, this.pointerWorld) <= UNIT_TYPES.artillery.range);
-      o.lineStyle(4, ok ? 0xc0392b : 0x8a8170, 0.9);
-      o.strokeCircle(this.pointerWorld.x, this.pointerWorld.y, RULES.bombardRadius);
+      for (const u of this.selectedWagons()) {
+        o.lineStyle(2, 0xbfe3b0, 0.5);
+        o.strokeCircle(u.x, u.y, RULES.supplyRange);
+      }
+      if (this.selectedGuns().length) {
+        const ok = this.selectedGuns().some((u) => dist(u, this.pointerWorld) <= UNIT_TYPES.artillery.range);
+        o.lineStyle(4, ok ? 0xc0392b : 0x8a8170, 0.9);
+        o.strokeCircle(this.pointerWorld.x, this.pointerWorld.y, RULES.bombardRadius);
+      }
+      if (this.selectedWagons().length) {
+        const ok = this.selectedWagons().some((u) => dist(u, this.pointerWorld) <= RULES.supplyRange);
+        o.lineStyle(4, ok ? 0x4f9d4a : 0x8a8170, 0.9);
+        o.strokeCircle(this.pointerWorld.x, this.pointerWorld.y, RULES.supplyAreaRadius);
+      }
     }
 
     // Ghost of a call-in being placed.
@@ -715,6 +787,25 @@ export class BattleScene extends Phaser.Scene {
     }
     if (u.type === 'engineers') g.strokeCircle(u.x, u.y, 8);
     if (u.type === 'cavalry') g.lineBetween(s[3].x, s[3].y, s[1].x, s[1].y);
+    if (u.type === 'supply') {
+      // Supply: a bar across the rear of the block, on two wheels.
+      g.lineBetween(s[2].x, s[2].y, s[3].x, s[3].y);
+      g.lineBetween((s[0].x + s[3].x) / 2, (s[0].y + s[3].y) / 2, (s[1].x + s[2].x) / 2, (s[1].y + s[2].y) / 2);
+      g.strokeCircle(u.x + (s[0].x - u.x) * 0.5, u.y + (s[0].y - u.y) * 0.5, 5);
+      g.strokeCircle(u.x + (s[1].x - u.x) * 0.5, u.y + (s[1].y - u.y) * 0.5, 5);
+    }
+    if (u.type === 'general') {
+      // The general: a banner on a pole above the staff block.
+      const up = screenToWorldDir(0, -1);
+      const right = screenToWorldDir(1, 0);
+      const top = { x: u.x + up.x * 62, y: u.y + up.y * 62 };
+      g.lineStyle(4, 0x2a2620, alpha);
+      g.lineBetween(u.x, u.y, top.x, top.y);
+      g.fillStyle(col.fill, alpha);
+      g.fillPoints([top, { x: top.x + right.x * 34 - up.x * 8, y: top.y + right.y * 34 - up.y * 8 }, { x: top.x - up.x * 18, y: top.y - up.y * 18 }], true);
+      g.fillStyle(col.symbol, alpha);
+      g.fillCircle(u.x, u.y, 7);
+    }
     if (u.type === 'artillery') {
       g.fillStyle(col.symbol, alpha);
       g.fillCircle(u.x, u.y, 8);
@@ -740,6 +831,32 @@ export class BattleScene extends Phaser.Scene {
       g.fillPoints(bar(-31, 62, 9), true);
       g.fillStyle(u.morale < RULES.waveringAt ? 0xd35400 : 0x7fc25b, 1);
       g.fillPoints(bar(-30, (60 * Math.max(0, u.morale)) / 100, 7), true);
+    }
+
+    // Own regiments show their ammunition as a thin blue bar under the morale bar, and their experience as pips.
+    const own = u.side === PLAYER || this.spectating;
+    if (own && (u.ammo < 99.5 || selected) && UNIT_TYPES[u.type].range > 0 || own && u.type === 'artillery' && u.ammo < 99.5) {
+      const up = screenToWorldDir(0, -1);
+      const right = screenToWorldDir(1, 0);
+      const lift = Math.max(unitSize(u).w, unitSize(u).d) / 2 + 6;
+      const o = { x: u.x + up.x * lift - right.x * 31, y: u.y + up.y * lift - right.y * 31 };
+      const rect = (len: number, h: number): Vec[] => [o, { x: o.x + right.x * len, y: o.y + right.y * len }, { x: o.x + right.x * len + up.x * h, y: o.y + right.y * len + up.y * h }, { x: o.x + up.x * h, y: o.y + up.y * h }];
+      g.fillStyle(0x1d1b16, 0.7);
+      g.fillPoints(rect(62, 6), true);
+      g.fillStyle(u.ammo < RULES.lowAmmo ? 0xc0392b : 0x5b9bd5, 1);
+      g.fillPoints(rect((62 * Math.max(0, u.ammo)) / 100, 6), true);
+    }
+    const level = experienceOf(u);
+    const pips = level === 'veteran' ? 1 : level === 'elite' ? 2 : 0;
+    if (pips && !isSupport(u)) {
+      const right = screenToWorldDir(1, 0);
+      const up = screenToWorldDir(0, -1);
+      const lift = Math.max(unitSize(u).w, unitSize(u).d) / 2 + 22;
+      for (let k = 0; k < pips; k++) {
+        const p = { x: u.x + up.x * lift + right.x * (40 + k * 14), y: u.y + up.y * lift + right.y * (40 + k * 14) };
+        g.fillStyle(0xf0c060, alpha);
+        g.fillCircle(p.x, p.y, 5);
+      }
     }
 
     if (u.meleeWith !== null) {

@@ -1,5 +1,5 @@
 import { MAP, RULES, UNIT_TYPES, UnitTypeId } from './config';
-import { OBJECTIVES, Vec, dist } from './map';
+import { OBJECTIVES, Vec, clampToMap, dist } from './map';
 import { Command, Side, Unit, World, formationOf } from './world';
 
 /**
@@ -70,13 +70,26 @@ export class AI {
     }
 
     for (const u of mine) {
-      if (u.meleeWith !== null) continue;
+      // An order already on its way by courier is not repeated.
+      if (u.meleeWith !== null || world.hasCourier(u.id)) continue;
       const nearest = this.nearest(u, visibleEnemies);
       const nd = nearest ? dist(u, nearest) : Infinity;
 
+      // The general rides behind the centre of the line; the wagons follow further back.
+      if (u.type === 'general' || u.type === 'supply') {
+        const anchor = this.frontAnchor(mine);
+        const back = u.type === 'general' ? 350 : 550;
+        const p = { x: anchor.x - this.dir() * back, y: anchor.y + (u.type === 'supply' ? this.dir() * 150 : 0) };
+        // Pull back when the enemy gets close.
+        if (nd < 600) p.x = u.x - this.dir() * 400;
+        this.moveIfFar(cmds, u, clampToMap(p, RULES.borderWidth + 80), 200);
+        if (u.type === 'supply') this.aimSupply(world, cmds, u, mine, visibleEnemies);
+        continue;
+      }
+
       if (u.type === 'cavalry') {
         const prey = visibleEnemies
-          .filter((e) => dist(u, e) < 800 && formationOf(e) !== 'fortified' && (e.state !== 'ok' || e.type === 'artillery' || e.type === 'light'))
+          .filter((e) => dist(u, e) < 800 && formationOf(e) !== 'fortified' && (e.state !== 'ok' || e.type === 'artillery' || e.type === 'light' || e.type === 'general' || e.type === 'supply'))
           .sort((a, b) => dist(u, a) - dist(u, b))[0];
         if (prey) {
           if (u.order.kind !== 'attack' || u.order.target !== prey.id) cmds.push({ kind: 'attack', side: this.side, ids: [u.id], target: prey.id });
@@ -143,11 +156,29 @@ export class AI {
     if (!u.fireZone || dist(u.fireZone, best) > 60) cmds.push({ kind: 'bombard', side: this.side, ids: [u.id], x: best.x, y: best.y });
   }
 
+  /** Point the wagons' supply area at the busiest stretch of our own line within reach. */
+  private aimSupply(world: World, cmds: Command[], u: Unit, mine: Unit[], enemies: Unit[]) {
+    if ((this.lastAim.get(u.id) ?? -99) > world.time - 8 || u.order.kind === 'move') return;
+    this.lastAim.set(u.id, world.time);
+    let best: Unit | undefined;
+    let bestScore = 0;
+    for (const f of mine) {
+      if (f.type === 'supply' || f.type === 'general' || dist(u, f) > RULES.supplyRange * 0.95) continue;
+      // Carts would be shot up in the firing line, so supply troops just behind it.
+      if (enemies.some((e) => e.state !== 'routing' && dist(e, f) < 450)) continue;
+      const near = mine.filter((o) => dist(o, f) < RULES.supplyAreaRadius);
+      const score = near.reduce((a, o) => a + (100 - o.ammo) + o.fatigue * 0.5, 0) + near.length;
+      if (score > bestScore) { bestScore = score; best = f; }
+    }
+    if (best && (!u.supplyZone || dist(u.supplyZone, best) > 80)) cmds.push({ kind: 'supplyArea', side: this.side, ids: [u.id], x: best.x, y: best.y });
+  }
+
   private reinforce(world: World): Command[] {
     const s = world.sides[this.side];
     const count = (t: UnitTypeId) => world.units.filter((u) => u.side === this.side && u.type === t).length;
     let wanted: UnitTypeId = 'line';
-    if (this.calls % 4 === 3) wanted = 'artillery';
+    if (count('supply') === 0) wanted = 'supply';
+    else if (this.calls % 4 === 3) wanted = 'artillery';
     else if (count('cavalry') < 2) wanted = 'cavalry';
     else if (this.calls % 5 === 1) wanted = 'light';
     if (world.callInBlocker(this.side, wanted) || s.manpower < UNIT_TYPES[wanted].cost) return [];

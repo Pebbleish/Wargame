@@ -1,9 +1,9 @@
 import {
-  CAVALRY_FORMATION_SPEED, FORMATION, FORMATIONS, Formation, MAP, RULES, UNIT_SIZE, UNIT_TYPES, UnitTypeId,
+  CAVALRY_FORMATION_SPEED, EXPERIENCE, Experience, FORMATION, FORMATIONS, Formation, MAP, RULES, UNIT_SIZE, UNIT_TYPES, UnitTypeId,
 } from './config';
 import {
-  CROSSINGS, EARTHWORKS, OBJECTIVES, Vec, addEarthwork, addPontoon, clampToMap, crossesRiver, dist, generateMap, nearCrossing,
-  nearestRiverPoint, planRoute, terrainAt,
+  CROSSINGS, EARTHWORKS, OBJECTIVES, Vec, addEarthwork, addPontoon, clampToMap, crossesRiver, dist,
+  generateMap, nearCrossing, nearestRiverPoint, planRoute, terrainAt,
 } from './map';
 import { Rng } from './rng';
 
@@ -35,6 +35,10 @@ export interface Unit {
   lastAttacker: number | null; // the most recent enemy to hurt this unit
   building: number; // engineers: seconds of work left on earthworks or a pontoon bridge
   buildKind: 'earthwork' | 'pontoon' | null;
+  brigade: number; // index into the side's brigades
+  fatigue: number; // 0 fresh to 100 exhausted
+  ammo: number; // 100 full, 0 out of rounds
+  xp: number; // experience points, see EXPERIENCE
   digIn: number; // seconds until a fortifying unit is dug in
   edgeTime: number; // seconds a shaken unit has spent pinned against the map border
   underFire: number; // seconds of "recently hit" left
@@ -48,12 +52,40 @@ export interface Unit {
   prev: { x: number; y: number; facing: number }; // position at the start of the tick, for smooth drawing
   fireZone: Vec | null; // artillery: the area it is bombarding
   reload: number; // artillery: seconds until the next shell
+  supplyZone: Vec | null; // supply wagons: the area they are resupplying
+  supplyLeft: number; // supply wagons: seconds the last delivered load keeps the area supplied
+  cartAt: number; // supply wagons: battle time the next cart can leave
 }
 
 export interface Impact {
   x: number;
   y: number;
   t: number;
+}
+
+/** A rider carrying orders to a regiment outside the general's command radius. */
+export interface Courier {
+  side: Side;
+  unit: number;
+  cmds: UnitCommand[];
+  x: number;
+  y: number;
+  seen: [boolean, boolean];
+}
+
+/** A cart of ammunition on its way from the wagon train to its supply area. It can be shot up on the road. */
+export interface Cart {
+  side: Side;
+  wagon: number;
+  x: number;
+  y: number;
+  hp: number;
+  seen: [boolean, boolean];
+}
+
+export interface Brigade {
+  name: string;
+  kind: 'infantry' | 'cavalry' | 'artillery' | 'army';
 }
 
 export interface CallIn {
@@ -79,6 +111,8 @@ export interface SideState {
   ready: boolean;
   nameCounters: Record<UnitTypeId, number>;
   works: number;
+  brigades: Brigade[];
+  generalLost: boolean;
 }
 
 export interface GameEvent {
@@ -87,18 +121,36 @@ export interface GameEvent {
   text: string;
 }
 
+// Orders to regiments. Outside the command radius they travel by courier; `relayed` marks one that has arrived.
+export type UnitCommand =
+  | { kind: 'move'; side: Side; moves: { id: number; x: number; y: number }[]; facing?: number; group?: number; relayed?: boolean }
+  | { kind: 'attack'; side: Side; ids: number[]; target: number; relayed?: boolean }
+  | { kind: 'bombard'; side: Side; ids: number[]; x: number; y: number; relayed?: boolean }
+  | { kind: 'ceaseFire'; side: Side; ids: number[]; relayed?: boolean }
+  | { kind: 'hold'; side: Side; ids: number[]; relayed?: boolean }
+  | { kind: 'formation'; side: Side; ids: number[]; formation?: Formation; relayed?: boolean }
+  | { kind: 'build'; side: Side; ids: number[]; relayed?: boolean }
+  | { kind: 'supplyArea'; side: Side; ids: number[]; x: number; y: number; relayed?: boolean };
+
 export type Command =
-  | { kind: 'move'; side: Side; moves: { id: number; x: number; y: number }[]; facing?: number }
-  | { kind: 'attack'; side: Side; ids: number[]; target: number }
-  | { kind: 'bombard'; side: Side; ids: number[]; x: number; y: number }
-  | { kind: 'ceaseFire'; side: Side; ids: number[] }
-  | { kind: 'hold'; side: Side; ids: number[] }
-  | { kind: 'formation'; side: Side; ids: number[]; formation?: Formation }
+  | UnitCommand
   | { kind: 'callIn'; side: Side; type: UnitTypeId; x: number; y: number }
   | { kind: 'requisition'; side: Side }
   | { kind: 'ready'; side: Side }
-  | { kind: 'resign'; side: Side }
-  | { kind: 'build'; side: Side; ids: number[] };
+  | { kind: 'resign'; side: Side };
+
+const UNIT_COMMANDS = new Set(['move', 'attack', 'bombard', 'ceaseFire', 'hold', 'formation', 'build', 'supplyArea']);
+
+function commandIds(cmd: UnitCommand): number[] {
+  return cmd.kind === 'move' ? cmd.moves.map((m) => m.id) : cmd.ids;
+}
+
+/** The same order, addressed only to some of its regiments. */
+function commandFor(cmd: UnitCommand, ids: number[]): UnitCommand {
+  return cmd.kind === 'move'
+    ? { ...cmd, moves: cmd.moves.filter((m) => ids.includes(m.id)) }
+    : { ...cmd, ids: cmd.ids.filter((id) => ids.includes(id)) };
+}
 
 export interface Result {
   winner: Side | -1;
@@ -113,7 +165,18 @@ const NAMES: Record<UnitTypeId, string[]> = {
   cavalry: ['Hussars', 'Dragoons', 'Uhlans'],
   artillery: ['Field Battery'],
   engineers: ['Pioneers'],
+  supply: ['Supply Train'],
+  general: ['Army HQ'],
 };
+
+export function experienceOf(u: Pick<Unit, 'xp'>): Experience {
+  return u.xp >= EXPERIENCE.elite.xp ? 'elite' : u.xp >= EXPERIENCE.veteran.xp ? 'veteran' : u.xp >= EXPERIENCE.trained.xp ? 'trained' : 'green';
+}
+
+/** Support units that never fight on their own initiative or take ground. */
+export function isSupport(u: Pick<Unit, 'type'>): boolean {
+  return u.type === 'general' || u.type === 'supply';
+}
 
 function ordinal(n: number): string {
   const s = ['th', 'st', 'nd', 'rd'];
@@ -157,7 +220,7 @@ export function homeEdgeX(side: Side): number {
 }
 
 function newSide(nation: string): SideState {
-  const zero = { line: 0, light: 0, cavalry: 0, artillery: 0, engineers: 0 };
+  const zero = { line: 0, light: 0, cavalry: 0, artillery: 0, engineers: 0, supply: 0, general: 0 };
   return {
     nation,
     manpower: RULES.startingBudget,
@@ -173,6 +236,12 @@ function newSide(nation: string): SideState {
     ready: false,
     nameCounters: { ...zero },
     works: 0,
+    brigades: [
+      { name: 'Army Troops', kind: 'army' },
+      { name: 'Cavalry Brigade', kind: 'cavalry' },
+      { name: 'Artillery Reserve', kind: 'artillery' },
+    ],
+    generalLost: false,
   };
 }
 
@@ -187,6 +256,8 @@ export class World {
   events: GameEvent[] = [];
   result: Result | null = null;
   impacts: Impact[] = [];
+  couriers: Courier[] = [];
+  carts: Cart[] = [];
   rng: Rng;
   private nextId = 1;
   private nextGroup = 1;
@@ -213,15 +284,68 @@ export class World {
     const dir = side === 0 ? 1 : -1;
     const at = (t: Vec, dx: number, dy: number) => ({ x: t.x + dx * dir, y: t.y + dy * dir });
     const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-    const spots: [UnitTypeId, Vec][] = [
-      ['line', at(a, 170, -190)], ['line', at(a, 170, 190)], ['light', at(a, 300, 0)],
-      ['line', at(b, 170, -190)], ['line', at(b, 170, 190)], ['line', at(b, -150, 0)],
+    // Each town is held by its own brigade; the general and the supply train stand back between them.
+    const first = this.newBrigade(side);
+    const second = this.newBrigade(side);
+    const spots: [UnitTypeId, Vec, number?][] = [
+      ['line', at(a, 170, -190), first], ['line', at(a, 170, 190), first], ['light', at(a, 300, 0), first],
+      ['line', at(b, 170, -190), second], ['line', at(b, 170, 190), second], ['line', at(b, -150, 0), second],
       ['artillery', at(mid, -60, 0)], ['cavalry', at(mid, -320, 0)], ['engineers', at(mid, -200, 120)],
+      ['general', at(mid, -250, -120)], ['supply', at(mid, -420, -200)],
     ];
-    for (const [type, p] of spots) {
+    for (const [type, p, brigade] of spots) {
       const q = clampToMap(p, RULES.borderWidth + 80);
-      this.spawn(side, type, q.x, q.y);
+      this.spawn(side, type, q.x, q.y, { brigade, xp: RULES.coreXp });
     }
+  }
+
+  private newBrigade(side: Side): number {
+    const list = this.sides[side].brigades;
+    const n = list.filter((b) => b.kind === 'infantry').length + 1;
+    list.push({ name: `${ordinal(n)} Brigade`, kind: 'infantry' });
+    return list.length - 1;
+  }
+
+  /** New infantry fills up the smallest brigade, or forms a new one; other arms have a brigade each. */
+  private brigadeFor(side: Side, type: UnitTypeId): number {
+    if (type === 'cavalry') return 1;
+    if (type === 'artillery') return 2;
+    if (type !== 'line' && type !== 'light') return 0;
+    const list = this.sides[side].brigades;
+    let best = -1;
+    let bestSize = RULES.brigadeSize;
+    list.forEach((b, i) => {
+      if (b.kind !== 'infantry') return;
+      const size = this.units.filter((u) => u.side === side && u.brigade === i).length;
+      if (size < bestSize) { bestSize = size; best = i; }
+    });
+    return best === -1 ? this.newBrigade(side) : best;
+  }
+
+  brigadeName(u: Unit): string {
+    return this.sides[u.side].brigades[u.brigade]?.name ?? '';
+  }
+
+  /** The army commander, while alive. */
+  general(side: Side): Unit | undefined {
+    return this.units.find((u) => u.side === side && u.type === 'general');
+  }
+
+  /** Inside the general's command radius orders arrive at once. Without a general, only troops in the deployment zone do. */
+  inCommand(u: Vec & { side: Side }): boolean {
+    const g = this.general(u.side);
+    return g ? dist(g, u) <= RULES.commandRadius : inZone(u.side, u);
+  }
+
+  /** Where couriers ride out from: the general, or the rear once the general has fallen. */
+  private commandPost(side: Side, near: Vec): Vec {
+    const g = this.general(side);
+    if (g) return { x: g.x, y: g.y };
+    return { x: side === 0 ? RULES.zoneStart + RULES.zoneDepth / 2 : MAP.width - RULES.zoneStart - RULES.zoneDepth / 2, y: near.y };
+  }
+
+  hasCourier(id: number): boolean {
+    return this.couriers.some((c) => c.unit === id);
   }
 
   /** During deployment, regiments can be placed in the deployment strip or around their home towns. */
@@ -229,7 +353,7 @@ export class World {
     return inZone(side, p) || this.homeTowns(side).some((t) => dist(t, p) <= RULES.townDeployRadius);
   }
 
-  spawn(side: Side, type: UnitTypeId, x: number, y: number): Unit {
+  spawn(side: Side, type: UnitTypeId, x: number, y: number, opts: { brigade?: number; xp?: number } = {}): Unit {
     const def = UNIT_TYPES[type];
     const s = this.sides[side];
     s.nameCounters[type] += 1;
@@ -268,6 +392,13 @@ export class World {
       prev: { x, y, facing: side === 0 ? 0 : Math.PI },
       fireZone: null,
       reload: 0,
+      supplyZone: null,
+      supplyLeft: 0,
+      cartAt: 0,
+      brigade: opts.brigade ?? this.brigadeFor(side, type),
+      fatigue: 0,
+      ammo: 100,
+      xp: opts.xp ?? RULES.calledInXp,
     };
     s.fieldedMen += def.men;
     this.units.push(unit);
@@ -279,7 +410,7 @@ export class World {
   }
 
   fieldCount(side: Side): number {
-    return this.units.filter((u) => u.side === side).length + this.sides[side].queue.length;
+    return this.units.filter((u) => u.side === side && u.type !== 'general').length + this.sides[side].queue.length;
   }
 
   private log(side: Side | -1, text: string) {
@@ -304,6 +435,11 @@ export class World {
         + s.queue.filter((c) => c.type === 'artillery').length;
       if (guns >= RULES.artilleryCap) return `Limit of ${RULES.artilleryCap} batteries`;
     }
+    if (type === 'supply') {
+      const wagons = this.units.filter((u) => u.side === side && u.type === 'supply').length
+        + s.queue.filter((c) => c.type === 'supply').length;
+      if (wagons >= RULES.supplyCap) return `Limit of ${RULES.supplyCap} supply trains`;
+    }
     if (s.manpower < def.cost) return 'Not enough manpower';
     if (this.fieldCount(side) >= RULES.fieldCap) return 'Army at full size';
     return null;
@@ -311,13 +447,16 @@ export class World {
 
   apply(cmd: Command) {
     if (this.phase === 'ended') return;
+    if (UNIT_COMMANDS.has(cmd.kind) && this.phase === 'battle' && !(cmd as UnitCommand).relayed) {
+      cmd = this.relay(cmd as UnitCommand);
+    }
     const own = (id: number) => {
       const u = this.unit(id);
       return u && u.side === cmd.side && u.state !== 'routing' ? u : undefined;
     };
     switch (cmd.kind) {
       case 'move': {
-        const group = cmd.moves.length > 1 ? this.nextGroup++ : 0;
+        const group = cmd.group ?? (cmd.moves.length > 1 ? this.nextGroup++ : 0);
         for (const m of cmd.moves) {
           const u = own(m.id);
           if (!u) continue;
@@ -342,7 +481,7 @@ export class World {
         if (!target || target.side === cmd.side || this.phase !== 'battle') break;
         for (const id of cmd.ids) {
           const u = own(id);
-          if (!u) continue;
+          if (!u || isSupport(u)) continue;
           if (u.type === 'artillery') {
             // Guns never charge: attacking with artillery means stopping and shelling where the target stands.
             this.aimGuns(u, target);
@@ -366,7 +505,23 @@ export class World {
       case 'ceaseFire': {
         for (const id of cmd.ids) {
           const u = own(id);
-          if (u) u.fireZone = null;
+          if (u) { u.fireZone = null; u.supplyZone = null; }
+        }
+        break;
+      }
+      case 'supplyArea': {
+        // Wagons never drive up to the area: they halt where they are and serve it if it is in reach.
+        if (this.phase !== 'battle') break;
+        for (const id of cmd.ids) {
+          const u = own(id);
+          if (u?.type !== 'supply') continue;
+          const zone = clampToMap({ x: cmd.x, y: cmd.y });
+          // Moving the area somewhere new means the next cart has to get there first.
+          if (!u.supplyZone || dist(u.supplyZone, zone) > RULES.supplyAreaRadius) u.supplyLeft = 0;
+          u.supplyZone = zone;
+          u.order = { kind: 'hold' };
+          u.waypoints = [];
+          u.marching = false;
         }
         break;
       }
@@ -451,6 +606,55 @@ export class World {
   }
 
   /**
+   * Regiments inside the command radius get the order now; the rest get it when a courier reaches them.
+   * Returns the part of the order to carry out at once.
+   */
+  private relay(cmd: UnitCommand): UnitCommand {
+    const ids = commandIds(cmd);
+    if (cmd.kind === 'move' && cmd.group === undefined && cmd.moves.length > 1) cmd = { ...cmd, group: this.nextGroup++ };
+    const now: number[] = [];
+    for (const id of ids) {
+      const u = this.unit(id);
+      if (!u || u.side !== cmd.side || this.inCommand(u)) { now.push(id); continue; }
+      const order = { ...commandFor(cmd, [id]), relayed: true } as UnitCommand;
+      const riding = this.couriers.find((c) => c.unit === id);
+      if (riding) riding.cmds.push(order);
+      else {
+        const from = this.commandPost(cmd.side, u);
+        this.couriers.push({ side: cmd.side, unit: id, cmds: [order], x: from.x, y: from.y, seen: [cmd.side === 0, cmd.side === 1] });
+      }
+    }
+    return commandFor(cmd, now);
+  }
+
+  /** Riders gallop to their regiment; enemy cavalry that gets close takes the dispatch. */
+  private updateCouriers() {
+    const step = RULES.courierSpeed * DT;
+    this.couriers = this.couriers.filter((c) => {
+      const u = this.unit(c.unit);
+      if (!u || u.state === 'routing') return false;
+      // Riders are only caught on the open road, not once they reach their regiment's lines.
+      const raider = dist(c, u) > 150 && this.units.find((e) => e.side !== c.side && e.type === 'cavalry' && e.state !== 'routing'
+        && dist(e, c) <= RULES.courierInterceptRange + unitRadius(e));
+      if (raider) {
+        this.log(c.side, `A courier to the ${u.name} was captured`);
+        return false;
+      }
+      const d = dist(c, u);
+      if (d <= step + unitRadius(u)) {
+        for (const order of c.cmds) this.apply(order);
+        return false;
+      }
+      c.x += ((u.x - c.x) / d) * step;
+      c.y += ((u.y - c.y) / d) * step;
+      for (const side of [0, 1] as Side[]) {
+        c.seen[side] = c.side === side || this.units.some((o) => o.side === side && dist(o, c) <= UNIT_TYPES[o.type].sight);
+      }
+      return true;
+    });
+  }
+
+  /**
    * Shell the given spot. In range, the battery halts and sets up where it stands; out of range,
    * it moves up until the spot is in range and sets up there.
    */
@@ -530,6 +734,8 @@ export class World {
     }
     this.updateGroupSpeeds();
     this.updateVisibility();
+    this.updateCouriers();
+    this.updateSupply();
     this.economy();
     this.arrivals();
     for (const u of this.units) this.updateUnit(u);
@@ -612,7 +818,7 @@ export class World {
     const def = UNIT_TYPES[u.type];
     const f = formationOf(u);
     const fm = u.type === 'cavalry' && f === 'formation' ? CAVALRY_FORMATION_SPEED : this.stats(u).speed;
-    let s = def.speed * RULES.moveSpeedScale * fm;
+    let s = def.speed * RULES.moveSpeedScale * fm * (1 - RULES.fatigueSpeedLoss * u.fatigue / 100);
     if (u.state === 'wavering') s *= 0.7;
     return s;
   }
@@ -684,11 +890,109 @@ export class World {
     // Leaving prepared positions gives up the fortification.
     if (u.moving && u.formation === 'fortified') u.formation = 'formation';
 
-    if (u.type === 'artillery') this.bombard(u);
-    else if (!u.moving && u.meleeWith === null) this.fire(u, enemies, target);
+    const firedBefore = u.firedAt;
+    if (u.type === 'artillery') {
+      this.bombard(u);
+    } else if (!u.moving && u.meleeWith === null) this.fire(u, enemies, target);
     else if (u.type === 'light' && formationOf(u) === 'formation' && u.meleeWith === null) this.fire(u, enemies, target, 0.5);
 
+    this.updateFatigue(u, u.firedAt !== firedBefore);
+    this.resupply(u);
+    if (u.underFire > 0 || u.meleeWith !== null) u.xp += RULES.xpCombat * DT;
     this.updateMorale(u, enemies);
+  }
+
+  /** Marching, charging, melee and long firefights tire troops; standing still lets them recover. */
+  private updateFatigue(u: Unit, fired: boolean) {
+    let rate = 0;
+    if (u.meleeWith !== null) rate += RULES.fatigueMelee;
+    if (u.moving) {
+      if (u.type === 'cavalry' && u.order.kind === 'attack') rate += RULES.fatigueCharge;
+      else rate += formationOf(u) === 'marching' ? RULES.fatigueMarch : RULES.fatigueMove;
+    }
+    if (fired) rate += RULES.fatigueFiring;
+    if (rate === 0) rate = -RULES.fatigueRest * (formationOf(u) === 'fortified' ? 1.25 : 1);
+    u.fatigue = Math.max(0, Math.min(100, u.fatigue + rate * DT));
+  }
+
+  /** Is a wagon train serving this spot right now? Wagons must stand still with the area in reach. */
+  inSupplyArea(side: Side, p: Vec): boolean {
+    return this.units.some((w) => w.side === side && w.type === 'supply' && this.supplyActive(w) && dist(w.supplyZone!, p) <= RULES.supplyAreaRadius);
+  }
+
+  /** The area is supplied while the last cart's load lasts. */
+  supplyActive(w: Unit): boolean {
+    return !!w.supplyZone && w.supplyLeft > 0;
+  }
+
+  /** Can this wagon train send carts to its area right now? It must stand still with the area in reach. */
+  canSendCarts(w: Unit): boolean {
+    return !!w.supplyZone && w.state !== 'routing' && !w.moving && w.meleeWith === null && dist(w, w.supplyZone) <= RULES.supplyRange;
+  }
+
+  /** Wagon trains send carts to their supply area; enemies in range of a cart on the road shoot it up. */
+  private updateSupply() {
+    for (const w of this.units) {
+      if (w.type !== 'supply') continue;
+      w.supplyLeft = Math.max(0, w.supplyLeft - DT);
+      if (!w.supplyZone) continue;
+      const enRoute = this.carts.some((c) => c.wagon === w.id);
+      if (!enRoute && this.canSendCarts(w) && this.time >= w.cartAt && w.supplyLeft < RULES.cartLead) {
+        this.carts.push({ side: w.side, wagon: w.id, x: w.x, y: w.y, hp: 100, seen: [w.side === 0, w.side === 1] });
+        w.cartAt = this.time + RULES.cartInterval;
+      }
+    }
+    this.carts = this.carts.filter((c) => {
+      const w = this.unit(c.wagon);
+      if (!w || !w.supplyZone) return false;
+      for (const e of this.units) {
+        if (e.side === c.side || e.state === 'routing' || isSupport(e)) continue;
+        const reach = (e.type === 'cavalry' ? 60 : UNIT_TYPES[e.type].range) + unitRadius(e);
+        if (e.type !== 'artillery' && dist(e, c) <= reach) c.hp -= RULES.cartDamage * DT;
+      }
+      for (const i of this.impacts) if (this.time - i.t < DT * 1.5 && dist(i, c) <= RULES.shellBlast) c.hp = 0;
+      if (c.hp <= 0) {
+        this.log(c.side, `A supply cart from the ${w.name} was destroyed`);
+        return false;
+      }
+      const d = dist(c, w.supplyZone);
+      const step = RULES.cartSpeed * DT;
+      // The cart unloads as soon as it reaches the edge of the area.
+      if (d <= step + RULES.supplyAreaRadius * 0.6) {
+        w.supplyLeft = RULES.cartLoad;
+        return false;
+      }
+      c.x += ((w.supplyZone.x - c.x) / d) * step;
+      c.y += ((w.supplyZone.y - c.y) / d) * step;
+      for (const side of [0, 1] as Side[]) {
+        c.seen[side] = c.side === side || this.units.some((o) => o.side === side && dist(o, c) <= UNIT_TYPES[o.type].sight);
+      }
+      return true;
+    });
+  }
+
+  /**
+   * Ammunition comes from the wagons' supply area (even mid-fight), or more slowly from the deployment zone
+   * and depots you hold when not firing. The supply area also lets tired troops recover.
+   */
+  private resupply(u: Unit) {
+    const area = this.inSupplyArea(u.side, u);
+    if (area) u.fatigue = Math.max(0, u.fatigue - RULES.supplyFatigueRelief * DT);
+    if (u.ammo >= 100) return;
+    if (area) {
+      u.ammo = Math.min(100, u.ammo + RULES.resupplyRate * DT);
+      return;
+    }
+    if (this.time - u.firedAt < 3) return;
+    const base = inZone(u.side, u)
+      || OBJECTIVES.some((o, i) => o.kind === 'depot' && this.owners[i] === u.side && dist(o, u) <= RULES.depotSupplyRadius);
+    if (base) u.ammo = Math.min(100, u.ammo + RULES.resupplyRate * 0.5 * DT);
+  }
+
+  /** Firepower left after fatigue, ammunition and experience. */
+  private firepower(u: Unit): number {
+    const ammo = u.ammo <= 0 ? 0 : u.ammo < RULES.lowAmmo ? 0.5 : 1;
+    return ammo * (1 - RULES.fatigueFireLoss * u.fatigue / 100) * EXPERIENCE[experienceOf(u)].fire;
   }
 
   /**
@@ -707,7 +1011,7 @@ export class World {
       return;
     }
     // Holding and fortified units fight back from where they are (they already return fire in range).
-    if (u.holdPosition || u.formation === 'fortified' || u.building > 0) return;
+    if (u.holdPosition || u.formation === 'fortified' || u.building > 0 || isSupport(u)) return;
     u.order = { kind: 'attack', target: a.id, retaliate: true };
     u.waypoints = planRoute(u, a);
     u.group = 0;
@@ -805,14 +1109,15 @@ export class World {
     const range = UNIT_TYPES.artillery.range * (terrainAt(u).hill ? 1.2 : 1);
     if (dist(u, zone) > range) return;
     u.facing = this.turnToward(u, Math.atan2(zone.y - u.y, zone.x - u.x));
-    if (u.reload > 0) return;
+    if (u.reload > 0 || u.ammo <= 0) return;
     u.reload = RULES.shellInterval * (u.state === 'wavering' ? 1.5 : 1);
     u.firedAt = this.time;
+    u.ammo = Math.max(0, u.ammo - RULES.shellAmmo);
     const a = this.rng.range(0, Math.PI * 2);
     const r = Math.sqrt(this.rng.next()) * RULES.bombardRadius;
     const hit = { x: zone.x + Math.cos(a) * r, y: zone.y + Math.sin(a) * r };
     this.impacts.push({ ...hit, t: this.time });
-    const strength = u.men / u.maxMen;
+    const strength = (u.men / u.maxMen) * this.firepower(u);
     for (const t of this.units) {
       const d = dist(t, hit) - unitRadius(t) * 0.6;
       if (d > RULES.shellBlast) continue;
@@ -830,6 +1135,7 @@ export class World {
     let taken = this.stats(t).fireTaken;
     if (t.type === 'cavalry') taken *= 1.1;
     if (t.type === 'light' && f !== 'marching') taken *= 0.6; // skirmishers are spread out
+    if (t.type === 'general') taken *= 0.3; // a handful of riders is a hard target
     return taken;
   }
 
@@ -846,8 +1152,10 @@ export class World {
     const lost = Math.min(target.men, casualties);
     target.men -= lost;
     this.sides[target.side].lostMen += lost;
+    if (from.side !== target.side) from.xp += (lost / target.maxMen) * RULES.xpPerKill;
     const flank = this.flankMultiplier(from, target);
-    target.morale -= (lost / target.maxMen) * 100 * moraleWeight * flank * this.stats(target).moraleTaken;
+    const steadiness = EXPERIENCE[experienceOf(target)].morale * (this.inCommand(target) ? RULES.commandMoraleTaken : 1);
+    target.morale -= (lost / target.maxMen) * 100 * moraleWeight * flank * this.stats(target).moraleTaken * steadiness;
     target.underFire = 2;
   }
 
@@ -882,8 +1190,11 @@ export class World {
     const waver = u.state === 'wavering' ? 0.6 : 1;
     const t = terrainAt(best);
     const taken = this.fireTaken(best);
-    const cas = u.men * fm * def.lethality * rangeMod * waver * t.cover * taken * scale * this.rng.range(0.8, 1.2) * DT;
+    const power = this.firepower(u);
+    if (power <= 0) return;
+    const cas = u.men * fm * def.lethality * rangeMod * waver * t.cover * taken * scale * power * this.rng.range(0.8, 1.2) * DT;
     this.damage(best, cas, u, u.type === 'artillery' ? 3.2 : 2.6);
+    u.ammo = Math.max(0, u.ammo - RULES.ammoUse * scale * DT);
     u.firedAt = this.time;
   }
 
@@ -907,6 +1218,7 @@ export class World {
     if (vs.type === 'cavalry' && u.type !== 'cavalry') p *= this.stats(u).vsCavalry;
     if (u.state === 'wavering') p *= 0.6;
     if (u.state === 'routing') p *= 0.1;
+    p *= (1 - RULES.fatigueMeleeLoss * u.fatigue / 100) * EXPERIENCE[experienceOf(u)].fire;
     return p * terrainAt(u).cover ** -0.5;
   }
 
@@ -927,10 +1239,13 @@ export class World {
   }
 
   private updateMorale(u: Unit, enemies: Unit[]) {
+    // The general and staff do not run: they stand until they are cut down.
+    if (u.type === 'general') { u.morale = 100; return; }
     const nearbyRouting = this.units.some((o) => o.side === u.side && o !== u && o.state === 'routing' && dist(o, u) < 250);
     if (nearbyRouting) u.morale -= 1.2 * DT * this.stats(u).moraleTaken;
     if (u.underFire <= 0 && u.meleeWith === null) {
-      u.morale = Math.min(100, u.morale + RULES.moraleRecovery * DT);
+      const boost = this.inCommand(u) ? RULES.commandMoraleRecovery : 1;
+      u.morale = Math.min(100, u.morale + RULES.moraleRecovery * boost * DT);
     }
     if (u.morale <= 0) {
       u.morale = 0;
@@ -948,11 +1263,18 @@ export class World {
 
   private updateRouting(u: Unit, enemies: Unit[]) {
     // Run for the nearest map edge that is not the enemy's side: home, or either flank.
+    // A first rout runs for the general instead, if the general is closer and out of danger.
     const exits = [{ x: homeEdgeX(u.side), y: u.y }, { x: u.x, y: 0 }, { x: u.x, y: MAP.height }];
-    const goal = exits.reduce((a, b) => (dist(u, b) < dist(u, a) ? b : a));
+    let goal: Vec = exits.reduce((a, b) => (dist(u, b) < dist(u, a) ? b : a));
+    const g = this.general(u.side);
+    const safeGeneral = g && !enemies.some((e) => e.state !== 'routing' && dist(e, g) < RULES.rallySafeDistance);
+    const nearGeneral = !!g && dist(u, g) <= RULES.commandRadius;
+    if (u.routs === 1 && g && safeGeneral && dist(u, g) < dist(u, goal)) {
+      goal = dist(u, g) > 120 ? g : u;
+    }
     const desired = Math.atan2(goal.y - u.y, goal.x - u.x);
     u.facing = desired;
-    const step = this.speedOf(u) * DT;
+    const step = goal === u ? 0 : this.speedOf(u) * DT;
     const next = { x: u.x + Math.cos(desired) * step, y: u.y + Math.sin(desired) * step };
     if (crossesRiver(u, next) && !nearCrossing(u) && !nearCrossing(next)) {
       // Routing troops swim for it, losing men on the way.
@@ -962,8 +1284,8 @@ export class World {
     u.y = next.y;
     u.moving = true;
     const threat = enemies.some((e) => e.state !== 'routing' && dist(e, u) < RULES.rallySafeDistance);
-    if (!threat) u.morale += 1.5 * DT;
-    if (u.routs === 1 && !threat && u.morale >= RULES.rallyAt) {
+    if (!threat) u.morale += 1.5 * (nearGeneral ? RULES.generalRallyBoost : 1) * DT;
+    if (u.routs === 1 && !threat && u.morale >= (nearGeneral ? RULES.rallyAtNearGeneral : RULES.rallyAt)) {
       u.state = 'wavering';
       u.order = { kind: 'hold' };
       u.facing = u.side === 0 ? 0 : Math.PI;
@@ -1017,6 +1339,12 @@ export class World {
         this.sides[u.side].removed += 1;
         this.sides[1 - u.side].score += 2;
         this.log(u.side, spent ? `${u.name} has been destroyed` : `${u.name} has deserted the field`);
+        if (u.type === 'general') {
+          const s = this.sides[u.side];
+          s.generalLost = true;
+          s.objectiveDrain += RULES.generalLossMorale;
+          this.log(-1, `The ${s.nation} general has fallen!`);
+        }
         for (const o of this.units) if (o.meleeWith === u.id) o.meleeWith = null;
         continue;
       }
@@ -1030,7 +1358,7 @@ export class World {
     OBJECTIVES.forEach((o, i) => {
       const present = [false, false];
       for (const u of this.units) {
-        if (u.state !== 'routing' && dist(u, o) <= RULES.captureRadius) present[u.side] = true;
+        if (u.state !== 'routing' && !isSupport(u) && dist(u, o) <= RULES.captureRadius) present[u.side] = true;
       }
       if (present[0] !== present[1]) {
         const side: Side = present[0] ? 0 : 1;

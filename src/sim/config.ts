@@ -1,7 +1,7 @@
 // All tunable numbers live here so balance changes never need code changes.
 // Distances are metres, times are seconds of battle clock, speeds are metres per second.
 
-export type UnitTypeId = 'line' | 'light' | 'cavalry' | 'artillery' | 'engineers';
+export type UnitTypeId = 'line' | 'light' | 'cavalry' | 'artillery' | 'engineers' | 'supply' | 'general';
 export type Formation = 'marching' | 'formation' | 'fortified';
 export const FORMATIONS: Formation[] = ['marching', 'formation', 'fortified'];
 
@@ -40,9 +40,18 @@ export const UNIT_TYPES: Record<UnitTypeId, UnitTypeDef> = {
     id: 'engineers', label: 'Engineers', men: 500, speed: 5.5, range: 200, lethality: 0.0015,
     shock: 0.5, sight: 800, cost: 200, arrival: 30, cooldown: 60,
   },
+  supply: {
+    id: 'supply', label: 'Supply wagons', men: 300, speed: 5, range: 0, lethality: 0,
+    shock: 0.1, sight: 700, cost: 150, arrival: 25, cooldown: 60,
+  },
+  // The army commander and staff: never called in, one per army.
+  general: {
+    id: 'general', label: 'Army HQ', men: 120, speed: 11, range: 0, lethality: 0,
+    shock: 0.4, sight: 1200, cost: 0, arrival: 0, cooldown: 0,
+  },
 };
 
-export const CALLIN_ORDER: UnitTypeId[] = ['engineers', 'light', 'cavalry', 'line', 'artillery'];
+export const CALLIN_ORDER: UnitTypeId[] = ['supply', 'engineers', 'light', 'cavalry', 'line', 'artillery'];
 
 export const FORMATION = {
   // fire: share of men that can fire; speed: multiplier on top speed; fireTaken: multiplier on casualties
@@ -63,6 +72,19 @@ export const UNIT_SIZE: Record<UnitTypeId, Record<Formation, Size>> = {
   cavalry: { marching: { w: 40, d: 90 }, formation: { w: 90, d: 35 }, fortified: { w: 90, d: 40 } },
   artillery: { marching: { w: 40, d: 70 }, formation: { w: 70, d: 30 }, fortified: { w: 70, d: 34 } },
   engineers: { marching: { w: 40, d: 70 }, formation: { w: 110, d: 26 }, fortified: { w: 110, d: 34 } },
+  supply: { marching: { w: 36, d: 70 }, formation: { w: 60, d: 36 }, fortified: { w: 60, d: 40 } },
+  general: { marching: { w: 30, d: 44 }, formation: { w: 44, d: 30 }, fortified: { w: 44, d: 34 } },
+};
+
+export type Experience = 'green' | 'trained' | 'veteran' | 'elite';
+
+// Experience points needed for each level, and what each level is worth.
+// fire: multiplier on casualties dealt (musketry, shells and melee); morale: multiplier on morale lost.
+export const EXPERIENCE: Record<Experience, { xp: number; fire: number; morale: number }> = {
+  green: { xp: 0, fire: 0.85, morale: 1.2 },
+  trained: { xp: 20, fire: 1.0, morale: 1.0 },
+  veteran: { xp: 50, fire: 1.1, morale: 0.9 },
+  elite: { xp: 90, fire: 1.2, morale: 0.8 },
 };
 
 export const RULES = {
@@ -89,6 +111,50 @@ export const RULES = {
 
   waveringAt: 40,
   rallyAt: 35,
+  rallyAtNearGeneral: 20, // routed troops reaching the general rally sooner
+  generalRallyBoost: 3, // and get their nerve back this many times faster
+
+  commandRadius: 600, // regiments this close to the general get orders at once and steadier morale
+  courierSpeed: 100, // orders to regiments outside the command radius are carried by a rider
+  courierInterceptRange: 80, // enemy cavalry this close to a rider captures the order
+  commandMoraleTaken: 0.85, // morale loss multiplier inside the command radius
+  commandMoraleRecovery: 1.5, // morale recovery multiplier inside the command radius
+  generalLossMorale: 15, // army morale lost for good when the general falls
+  brigadeSize: 4, // regiments per infantry brigade
+
+  // Fatigue (0 fresh to 100 exhausted), points per second.
+  fatigueMarch: 0.15,
+  fatigueMove: 0.3,
+  fatigueCharge: 1.2,
+  fatigueMelee: 1.5,
+  fatigueFiring: 0.25,
+  fatigueRest: 0.8,
+  fatigueSpeedLoss: 0.35, // share of speed lost when exhausted
+  fatigueFireLoss: 0.3, // share of firepower lost when exhausted
+  fatigueMeleeLoss: 0.4, // share of melee strength lost when exhausted
+
+  // Ammunition (100 = full), points per second of firing.
+  ammoUse: 0.5,
+  shellAmmo: 1.5, // per shell
+  lowAmmo: 25, // below this, fire is halved
+  resupplyRate: 2, // per second inside a wagon train's supply area (half that at depots and in the deployment zone)
+  supplyRange: 900, // wagons serve an area up to this far away, without driving to it
+  supplyAreaRadius: 220, // size of the supply area
+  cartSpeed: 35, // supply carts drive to the area at this speed
+  cartInterval: 10, // seconds between carts from one wagon train
+  cartLoad: 25, // seconds one cart keeps the area supplied
+  cartLead: 10, // a new cart sets off when the current load has this long left
+  cartDamage: 30, // cart health (of 100) lost per second per enemy in range; a shell burst destroys it
+  supplyFatigueRelief: 1.2, // extra fatigue recovered per second inside the supply area
+  depotSupplyRadius: 300, // held depots refill regiments this close
+  supplyCap: 2, // supply wagons per side
+
+  calledInXp: 0, // reinforcements arrive green
+  coreXp: 25, // the starting army is trained
+  xpPerKill: 60, // experience for destroying a regiment's worth of men
+  xpCombat: 0.03, // per second in combat
+
+
   rallySafeDistance: 450,
   moraleRecovery: 0.6, // per second when not under pressure
   fortifyTime: 10, // digging in (only possible out of combat) takes this long before the bonuses apply
