@@ -130,7 +130,7 @@ export class Hud {
       <p><b>Marching</b> is fastest but fights badly; troops march automatically on any move out of combat and form up when they arrive. <b>Formation</b> is the fighting stance. <b>Fortified</b> barely moves but takes less damage and loses morale more slowly. Digging in takes ${RULES.fortifyTime}s and is only possible out of combat; moving gives it up. Shells hit fortified troops harder.</p>
       <p>Engineers (<kbd>E</kbd>) build earthworks that give cover like a village, or a pontoon bridge when standing at a river (up to ${RULES.maxWorks} per side). Troops near engineers dig in twice as fast.</p>
       <p>Artillery stops and sets up when you give it a target, and only fires once set up. Units in woods are hidden unless your troops are within ${RULES.woodsSpotRange}m; firing guns give themselves away.</p>
-      <p>Call in troops from the bar at the bottom, then click inside your deployment zone (the shaded strip near the bottom). They march in from your map edge.</p>
+      <p>Call in troops from the bar on the left, then click inside your deployment zone (the shaded strip near the bottom). They march in from your map edge.</p>
       <p><button data-a="close">Got it</button></p>`;
     this.help.addEventListener('click', (e) => {
       if ((e.target as HTMLElement).dataset.a === 'close') this.help.style.display = 'none';

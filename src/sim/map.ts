@@ -24,9 +24,11 @@ export interface Earthwork extends Circle { side: 0 | 1 }
 // The battlefield is laid out on a 3200 x 2000 sketch and scaled up to the real map size.
 // A fresh layout is generated for every battle. It is always point-symmetric around the centre
 // (whatever one side has, the other has rotated 180 degrees) so neither side has an advantage.
-const S = MAP.width / 3200;
-const v = (x: number, y: number): Vec => ({ x: x * S, y: y * S });
-const c = (x: number, y: number, r: number): Circle => ({ x: x * S, y: y * S, r: r * S });
+// The sketch was drawn for a 4800 m long field; the empty ground behind each deployment strip is trimmed off.
+const S = MAP.height / 2000;
+const TRIM = (3200 * S - MAP.width) / 2;
+const v = (x: number, y: number): Vec => ({ x: x * S - TRIM, y: y * S });
+const c = (x: number, y: number, r: number): Circle => ({ x: x * S - TRIM, y: y * S, r: r * S });
 const mirror = (p: Vec): Vec => ({ x: MAP.width - p.x, y: MAP.height - p.y });
 
 export const RIVER_WIDTH = 40;
@@ -142,14 +144,14 @@ export function generateMap(seed: number) {
   replace(WOODS, []);
   replace(MARSHES, []);
   const clear = (p: Circle) =>
-    p.x > 450 * S && p.x < 1520 * S &&
+    p.x > 650 * S - TRIM && p.x < 1520 * S - TRIM &&
     OBJECTIVES.every((o) => dist(p, o) > p.r + VILLAGE_RADIUS + 60) &&
     CROSSINGS.every((k) => dist(p, k) > p.r + 120) &&
     [...WOODS, ...HILLS, ...MARSHES].every((o) => dist(p, o) > p.r + o.r + 40);
   const scatter = (count: number, minR: number, maxR: number, into: Circle[]) => {
     const placed: Circle[] = [];
     for (let tries = 0; placed.length < count && tries < 300; tries++) {
-      const p = c(rng.range(350, 1520), rng.range(150, 1850), rng.range(minR, maxR));
+      const p = c(rng.range(650, 1520), rng.range(150, 1850), rng.range(minR, maxR));
       if (!clear(p) || dist(p, mirror(p)) < p.r * 2 + 80) continue;
       placed.push(p);
       into.push(p, { ...mirror(p), r: p.r });
@@ -170,7 +172,7 @@ export function generateMap(seed: number) {
       const d = core.r * rng.range(0.6, 1.1);
       const lobe = { x: core.x + Math.cos(heading) * d, y: core.y + Math.sin(heading) * d, r };
       if (OBJECTIVES.some((o) => dist(lobe, o) < r + VILLAGE_RADIUS + 30) || CROSSINGS.some((k2) => dist(lobe, k2) < r + 90)) continue;
-      if (lobe.x < 400 * S || lobe.x > MAP.width / 2 - r) continue;
+      if (lobe.x < 600 * S - TRIM || lobe.x > MAP.width / 2 - r) continue;
       WOODS.push(lobe, { ...mirror(lobe), r });
     }
   }

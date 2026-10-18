@@ -48,7 +48,7 @@
       #captions { position: absolute; top: 112px; left: 50%; transform: translateX(-50%); text-align: center; pointer-events: none; }
       #captions div { font-family: 'EB Garamond', Georgia, serif; font-size: 18px; color: #fffaf0; text-shadow: 0 1px 3px #000, 0 0 8px rgba(0,0,0,0.6); margin: 2px 0; transition: opacity 0.6s; }
 
-      #callins { position: absolute; bottom: 8px; left: 50%; transform: translateX(-50%); display: flex; gap: 6px; padding: 6px; align-items: stretch; }
+      #callins { position: absolute; top: 112px; left: 8px; display: flex; flex-direction: column; gap: 6px; padding: 6px; align-items: stretch; }
       .card { position: relative; width: 122px; padding: 6px 8px; border: 1px solid var(--edge); border-radius: 5px; background: #fffaf0; cursor: pointer; overflow: hidden; text-align: left; }
       .card.active { outline: 2px solid #c58b00; }
       .card.off { opacity: 0.55; cursor: default; }
@@ -56,7 +56,7 @@
       .card .c { font-size: 11px; color: var(--muted); }
       .card .cool { position: absolute; left: 0; bottom: 0; height: 3px; background: #c58b00; }
       .card .why { font-size: 10px; color: var(--bad); min-height: 12px; }
-      #queue { display: flex; flex-direction: column; justify-content: center; gap: 2px; padding: 0 6px; min-width: 120px; font-size: 11px; color: var(--muted); }
+      #queue { display: flex; flex-direction: column; justify-content: center; gap: 2px; padding: 2px 4px; max-width: 122px; font-size: 11px; color: var(--muted); }
 
       #selection { position: absolute; bottom: 8px; left: 8px; width: 290px; padding: 8px 10px; display: none; }
       #selection .n { font-family: 'EB Garamond', Georgia, serif; font-weight: 700; font-size: 17px; }

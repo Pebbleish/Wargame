@@ -134,7 +134,7 @@ export class BattleScene extends Phaser.Scene {
   private fitCamera() {
     const cam = this.cameras.main;
     cam.setZoom(Math.max(this.minZoom(), Math.min(cam.width / MAP.height, 0.6)));
-    this.centerOn({ x: MAP.width * 0.3, y: MAP.height / 2 });
+    this.centerOn({ x: 0, y: MAP.height / 2 }); // clamped below so your own edge sits at the bottom of the screen
     this.clampCamera();
   }
 
