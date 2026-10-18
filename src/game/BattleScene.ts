@@ -541,13 +541,27 @@ export class BattleScene extends Phaser.Scene {
     }
     for (const i of w.impacts) {
       const age = w.time - i.t;
-      g.fillStyle(0x3b3428, 0.35 * (1 - age / 3));
-      g.fillCircle(i.x, i.y, 22);
-      if (age < 1) {
-        g.fillStyle(0xf0c060, 0.8 * (1 - age));
-        g.fillCircle(i.x, i.y, 18 + age * 20);
-        g.fillStyle(0xeeeae0, 0.5 * (1 - age));
-        g.fillCircle(i.x + 10, i.y - 14, 28 + age * 30);
+      const blast = RULES.shellBlast;
+      // Scorched crater, then a flash, a shock ring and a rolling cloud of smoke.
+      g.fillStyle(0x3b3428, 0.4 * (1 - age / 3));
+      g.fillCircle(i.x, i.y, blast * 0.6);
+      if (age < 0.5) {
+        g.lineStyle(4, 0xfff3cf, 0.7 * (1 - age / 0.5));
+        g.strokeCircle(i.x, i.y, blast * (0.4 + age * 2.4));
+      }
+      if (age < 1.2) {
+        const k = 1 - age / 1.2;
+        g.fillStyle(0xd9542b, 0.7 * k);
+        g.fillCircle(i.x, i.y, blast * (0.5 + age * 0.4));
+        g.fillStyle(0xf0c060, 0.85 * k);
+        g.fillCircle(i.x, i.y, blast * (0.3 + age * 0.4));
+      }
+      if (age < 2.5) {
+        const k = 1 - age / 2.5;
+        g.fillStyle(0xeeeae0, 0.45 * k);
+        g.fillCircle(i.x + 12, i.y - 16, blast * (0.7 + age * 0.5));
+        g.fillStyle(0xcfc8b8, 0.35 * k);
+        g.fillCircle(i.x - 18, i.y - 4, blast * (0.5 + age * 0.45));
       }
     }
 

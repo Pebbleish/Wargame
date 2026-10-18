@@ -98,8 +98,8 @@ export const RULES = {
 
   artilleryCap: 3, // batteries per side, including ones on the way
   bombardRadius: 130, // shells land at random inside this circle
-  shellBlast: 45,
-  shellDamage: 70, // casualties from a direct hit at full battery strength
+  shellBlast: 70, // radius of each shell's explosion
+  shellDamage: 55, // casualties from a direct hit at full battery strength
   shellInterval: 3.5, // seconds between shells per battery
   shellVsFortified: 1.6, // shells are the answer to dug-in troops
   friendlyFire: 0.5, // share of shell damage your own troops take inside the circle
