@@ -127,7 +127,7 @@ export class Hud {
     this.help.innerHTML = `
       <h3>How to play</h3>
       <p>Break the enemy army's morale, hold every objective for ${RULES.dominationHold}s, or lead on points when the ${RULES.matchLength / 60}-minute clock runs out.</p>
-      <p><kbd>Left-click</kbd> select · <kbd>drag</kbd> move the map · <kbd>Shift</kbd>+drag box select · <kbd>Shift</kbd>+click add<br>
+      <p><kbd>Left-click</kbd> select · <kbd>drag</kbd> move the map · <kbd>Shift</kbd>+drag box select (<kbd>Ctrl</kbd>+<kbd>Shift</kbd> to add) · <kbd>Shift</kbd>+click add<br>
       <kbd>Right-click</kbd> move, or attack an enemy<br>
       <kbd>Right-drag</kbd> form a line along the drag<br>
       <kbd>F</kbd> cycle formation, or <kbd>1</kbd> march · <kbd>2</kbd> formation · <kbd>3</kbd> fortify · <kbd>H</kbd> hold<br>

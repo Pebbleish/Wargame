@@ -224,7 +224,7 @@ export class BattleScene extends Phaser.Scene {
       if (d?.panning) this.pan = null;
       if (!d || (d.panning && d.moved)) return;
       const end = { x: p.worldX, y: p.worldY };
-      if (d.button === 0) this.leftRelease(d, end, p.event.shiftKey);
+      if (d.button === 0) this.leftRelease(d, end, p.event.shiftKey, p.event.ctrlKey || p.event.metaKey);
       if (d.button === 2) this.rightRelease(d, end);
     });
 
@@ -288,7 +288,7 @@ export class BattleScene extends Phaser.Scene {
     return this.selectedGuns();
   }
 
-  private leftRelease(d: Drag, end: Vec, shift: boolean) {
+  private leftRelease(d: Drag, end: Vec, shift: boolean, add = false) {
     if (this.spectating) return;
     if (this.aiming) {
       this.aiming = false;
@@ -327,7 +327,8 @@ export class BattleScene extends Phaser.Scene {
     const x1 = Math.max(d.start.x, end.x);
     const y0 = Math.min(d.start.y, end.y);
     const y1 = Math.max(d.start.y, end.y);
-    if (!shift) this.selected.clear();
+    // A new box replaces the selection; hold Ctrl as well to add to it.
+    if (!add) this.selected.clear();
     for (const u of this.world.units) {
       if (u.side === PLAYER && u.state !== 'routing' && u.x >= x0 && u.x <= x1 && u.y >= y0 && u.y <= y1) this.selected.add(u.id);
     }
