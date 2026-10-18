@@ -21,11 +21,11 @@ export interface UnitTypeDef {
 
 export const UNIT_TYPES: Record<UnitTypeId, UnitTypeDef> = {
   line: {
-    id: 'line', label: 'Line infantry', men: 2400, speed: 6, range: 260, lethality: 0.0022,
+    id: 'line', label: 'Line infantry', men: 2400, speed: 6, range: 260, lethality: 0.0040,
     shock: 1.0, sight: 900, cost: 400, arrival: 30, cooldown: 45,
   },
   light: {
-    id: 'light', label: 'Light infantry', men: 900, speed: 7, range: 320, lethality: 0.0032,
+    id: 'light', label: 'Light infantry', men: 900, speed: 7, range: 320, lethality: 0.0055,
     shock: 0.6, sight: 1100, cost: 250, arrival: 20, cooldown: 30,
   },
   cavalry: {
@@ -58,7 +58,7 @@ export const FORMATION = {
   // received; moraleTaken: multiplier on morale lost per casualty; vsCavalry: melee strength vs cavalry
   marching: { fire: 0.25, speed: 1.0, fireTaken: 1.3, moraleTaken: 1.2, vsCavalry: 0.6 },
   formation: { fire: 1.0, speed: 0.55, fireTaken: 1.0, moraleTaken: 1.0, vsCavalry: 1.0 },
-  fortified: { fire: 0.9, speed: 0.12, fireTaken: 0.7, moraleTaken: 0.65, vsCavalry: 2.0 },
+  fortified: { fire: 0.9, speed: 0.12, fireTaken: 0.8, moraleTaken: 0.75, vsCavalry: 1.6 },
 } as const;
 
 

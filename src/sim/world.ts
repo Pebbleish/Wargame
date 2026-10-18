@@ -1145,7 +1145,17 @@ export class World {
     return p * terrainAt(u).cover ** -0.5;
   }
 
+  /**
+   * Every pair of blocks in contact fights. A unit fighting several enemies at once splits its strength between
+   * them, and takes blows from all of them, so ganging up on a regiment works.
+   */
   private resolveMelee() {
+    const foes = new Map<number, Unit[]>();
+    const link = (a: Unit, b: Unit) => {
+      const list = foes.get(a.id) ?? [];
+      if (!list.includes(b)) list.push(b);
+      foes.set(a.id, list);
+    };
     for (const u of this.units) {
       if (u.meleeWith === null) continue;
       const e = this.unit(u.meleeWith);
@@ -1153,13 +1163,20 @@ export class World {
         u.meleeWith = null;
         continue;
       }
-      const pe = this.meleePower(e, u);
-      this.damage(u, pe * 0.0035 * DT * this.rng.range(0.8, 1.2), e, 3);
-      // Nobody fights back while running, so pursuit is where routs turn into heavy losses.
-      if (e.state === 'routing') this.damage(e, this.meleePower(u, e) * 0.006 * DT, u, 0);
-      if (e.meleeWith !== u.id && e.state !== 'routing') e.meleeWith = u.id;
+      link(u, e);
+      link(e, u);
+      if (e.meleeWith === null && e.state !== 'routing') e.meleeWith = u.id;
+    }
+    for (const u of this.units) {
+      for (const e of foes.get(u.id) ?? []) {
+        const split = foes.get(e.id)?.length ?? 1;
+        if (e.state !== 'routing') this.damage(u, (this.meleePower(e, u) / split) * 0.0035 * DT * this.rng.range(0.8, 1.2), e, 3);
+        // Nobody fights back while running, so pursuit is where routs turn into heavy losses.
+        else if (u.state !== 'routing') this.damage(e, (this.meleePower(u, e) / (foes.get(u.id)!.length)) * 0.006 * DT, u, 0);
+      }
     }
   }
+
 
   private updateMorale(u: Unit, enemies: Unit[]) {
     // The general and staff do not run: they stand until they are cut down.
