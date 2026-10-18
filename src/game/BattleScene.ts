@@ -2,7 +2,7 @@ import Phaser from 'phaser';
 import { MAP, RULES, UNIT_TYPES, UnitTypeId } from '../sim/config';
 import { AI } from '../sim/ai';
 import { CROSSINGS, EARTHWORKS, OBJECTIVES, Vec, dist } from '../sim/map';
-import { Side, Unit, World, experienceOf, formationOf, inZone, isSupport, unitSize } from '../sim/world';
+import { Side, Unit, World, experienceOf, formationOf, inZone, isSupport, unitRadius, unitSize } from '../sim/world';
 import { Hud } from './hud';
 import { paintTerrain } from './terrain';
 
@@ -591,17 +591,16 @@ export class BattleScene extends Phaser.Scene {
         g.lineBetween(u.x, u.y, u.fireZone.x, u.fireZone.y);
       }
     }
-    // Our wagon trains: the zone they supply on their own, and the spot their last cart is serving.
+    // Our wagon trains: the ring they supply on their own, and a green halo on each regiment a cart has reached.
     for (const u of w.units) {
-      if ((u.side !== PLAYER && !this.spectating) || u.type !== 'supply' || u.state === 'routing') continue;
-      const sel = this.selected.has(u.id);
-      g.lineStyle(sel ? 4 : 2, 0x4f9d4a, sel ? 0.7 : 0.3);
-      g.strokeCircle(u.x, u.y, RULES.supplyRange);
-      if (u.supplyZone && w.supplyActive(u)) {
+      if (u.side !== PLAYER && !this.spectating) continue;
+      if (u.type === 'supply' && u.state !== 'routing') {
+        const sel = this.selected.has(u.id);
+        g.lineStyle(sel ? 4 : 2, 0x4f9d4a, sel ? 0.7 : 0.3);
+        g.strokeCircle(u.x, u.y, RULES.supplyRange);
+      } else if (w.isSupplied(u) && u.state !== 'routing') {
         g.lineStyle(3, 0x4f9d4a, 0.6);
-        g.strokeCircle(u.supplyZone.x, u.supplyZone.y, RULES.supplyAreaRadius);
-        g.fillStyle(0x4f9d4a, 0.08);
-        g.fillCircle(u.supplyZone.x, u.supplyZone.y, RULES.supplyAreaRadius);
+        g.strokeCircle(u.x, u.y, unitRadius(u) + 18);
       }
     }
 
@@ -614,7 +613,7 @@ export class BattleScene extends Phaser.Scene {
       g.strokeCircle(gen.x, gen.y, RULES.commandRadius);
     }
 
-    // Supply carts on the road to their area.
+    // Supply carts on the road to their regiments.
     for (const c of w.carts) {
       if (!this.spectating && !c.seen[PLAYER]) continue;
       g.fillStyle(0x1d1b16, 0.9);

@@ -30,7 +30,7 @@ export const UNIT_TYPES: Record<UnitTypeId, UnitTypeDef> = {
   },
   cavalry: {
     id: 'cavalry', label: 'Cavalry', men: 900, speed: 13, range: 0, lethality: 0,
-    shock: 2.6, sight: 1400, cost: 350, arrival: 20, cooldown: 60,
+    shock: 2.3, sight: 1400, cost: 350, arrival: 20, cooldown: 60,
   },
   artillery: {
     id: 'artillery', label: 'Artillery', men: 400, speed: 5, range: 1500, lethality: 0,
@@ -138,15 +138,15 @@ export const RULES = {
   ammoUse: 0.85, // a regiment firing flat out runs dry in about two minutes
   shellAmmo: 3, // per shell
   lowAmmo: 25, // below this, fire is halved
-  resupplyRate: 2, // per second inside a wagon train's supply area (half that at depots and in the deployment zone)
-  supplyRange: 900, // wagons send carts to troops this far away, without driving there themselves
-  supplyAreaRadius: 220, // size of the supply area
-  cartSpeed: 35, // supply carts drive to the area at this speed
-  cartInterval: 10, // seconds between carts from one wagon train
-  cartLoad: 25, // seconds one cart keeps the area supplied
+  resupplyRate: 2, // per second while a supply cart's load lasts (half that at depots and in the deployment zone)
+  supplyRange: 900, // wagons send carts to every regiment inside this ring, without driving there themselves
+  cartSpeed: 35, // supply carts drive to their regiment at this speed
+  cartInterval: 3, // seconds between carts leaving one wagon train
+  cartsOut: 4, // carts one wagon train can have on the road at once
+  cartLoad: 30, // seconds one cart keeps its regiment supplied
   cartLead: 10, // a new cart sets off when the current load has this long left
   cartDamage: 30, // cart health (of 100) lost per second per enemy in range; a shell burst destroys it
-  supplyFatigueRelief: 1.2, // extra fatigue recovered per second inside the supply area
+  supplyFatigueRelief: 1.2, // extra fatigue recovered per second while supplied
   depotSupplyRadius: 300, // held depots refill regiments this close
   supplyCap: 3, // supply wagons per side (each army starts with 2)
   autoSupplyMinNeed: 15, // carts only go where missing ammunition and fatigue add up to this much

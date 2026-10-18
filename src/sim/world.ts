@@ -52,8 +52,7 @@ export interface Unit {
   prev: { x: number; y: number; facing: number }; // position at the start of the tick, for smooth drawing
   fireZone: Vec | null; // artillery: the area it is bombarding
   reload: number; // artillery: seconds until the next shell
-  supplyZone: Vec | null; // supply wagons: the area they are sending carts to, picked automatically
-  supplyLeft: number; // supply wagons: seconds the last delivered load keeps the area supplied
+  suppliedUntil: number; // battle time until which the last supply cart to reach this unit keeps it supplied
   cartAt: number; // supply wagons: battle time the next cart can leave
 }
 
@@ -63,10 +62,11 @@ export interface Impact {
   t: number;
 }
 
-/** A cart of ammunition on its way from the wagon train to its supply area. It can be shot up on the road. */
+/** A cart of ammunition on its way from the wagon train to a regiment. It can be shot up on the road. */
 export interface Cart {
   side: Side;
   wagon: number;
+  target: number; // the regiment it is driving to
   x: number;
   y: number;
   hp: number;
@@ -353,8 +353,7 @@ export class World {
       prev: { x, y, facing: side === 0 ? 0 : Math.PI },
       fireZone: null,
       reload: 0,
-      supplyZone: null,
-      supplyLeft: 0,
+      suppliedUntil: 0,
       cartAt: 0,
       brigade: opts.brigade ?? this.brigadeFor(side, type),
       fatigue: 0,
@@ -812,59 +811,51 @@ export class World {
     u.fatigue = Math.max(0, Math.min(100, u.fatigue + rate * DT));
   }
 
-  /** Is a wagon train serving this spot right now? Wagons must stand still with the area in reach. */
-  inSupplyArea(side: Side, p: Vec): boolean {
-    return this.units.some((w) => w.side === side && w.type === 'supply' && this.supplyActive(w) && dist(w.supplyZone!, p) <= RULES.supplyAreaRadius);
+  /** Is this regiment drawing on a supply cart that reached it? */
+  isSupplied(u: Unit): boolean {
+    return this.time < u.suppliedUntil;
   }
 
-  /** The area is supplied while the last cart's load lasts. */
-  supplyActive(w: Unit): boolean {
-    return !!w.supplyZone && w.supplyLeft > 0;
-  }
-
-  /** Can this wagon train send carts to its area right now? It must stand still with the area in reach. */
+  /** Can this wagon train send carts right now? It must stand still and not be fighting. */
   canSendCarts(w: Unit): boolean {
-    return !!w.supplyZone && w.state !== 'routing' && !w.moving && w.meleeWith === null && dist(w, w.supplyZone) <= RULES.supplyRange + RULES.supplyAreaRadius;
+    return w.state !== 'routing' && !w.moving && w.meleeWith === null;
   }
 
-  /** Wagons supply on their own: carts go to the troops in reach that are shortest of ammunition or most tired. */
-  private pickSupplyArea(w: Unit) {
-    let best: Unit | undefined;
-    let bestNeed = RULES.autoSupplyMinNeed;
-    for (const f of this.units) {
-      if (f.side !== w.side || isSupport(f) || f.state === 'routing' || dist(w, f) > RULES.supplyRange) continue;
-      // Count everyone the area would cover, so carts go where they help the most troops.
-      let need = 0;
-      for (const o of this.units) {
-        if (o.side === w.side && !isSupport(o) && o.state !== 'routing' && dist(o, f) <= RULES.supplyAreaRadius) {
-          need += (100 - o.ammo) + o.fatigue * 0.5;
-        }
-      }
-      if (need > bestNeed) { bestNeed = need; best = f; }
-    }
-    if (!best) return;
-    if (!w.supplyZone || dist(w.supplyZone, best) > RULES.supplyAreaRadius * 0.5) {
-      w.supplyZone = { x: best.x, y: best.y };
-      w.supplyLeft = 0;
-    }
+  /** How much a regiment needs a cart: missing ammunition plus half its fatigue. */
+  private supplyNeed(u: Unit): number {
+    return (UNIT_TYPES[u.type].range > 0 || u.type === 'artillery' ? 100 - u.ammo : 0) + u.fatigue * 0.5;
   }
 
-  /** Wagon trains send carts to their supply area; enemies in range of a cart on the road shoot it up. */
+  /** The regiments inside this wagon train's ring that are supplied or have a cart on the way. */
+  supplyingCount(w: Unit): number {
+    return this.units.filter((u) => u.side === w.side && !isSupport(u) && dist(w, u) <= RULES.supplyRange
+      && (this.isSupplied(u) || this.carts.some((c) => c.target === u.id))).length;
+  }
+
+  /**
+   * Wagons supply on their own: every regiment inside the ring that needs it gets carts, neediest first,
+   * with several carts on the road at once.
+   */
   private updateSupply() {
     for (const w of this.units) {
-      if (w.type !== 'supply') continue;
-      w.supplyLeft = Math.max(0, w.supplyLeft - DT);
-      const enRoute = this.carts.some((c) => c.wagon === w.id);
-      if (!enRoute && this.time >= w.cartAt && w.supplyLeft < RULES.cartLead) this.pickSupplyArea(w);
-      if (!w.supplyZone) continue;
-      if (!enRoute && this.canSendCarts(w) && this.time >= w.cartAt && w.supplyLeft < RULES.cartLead) {
-        this.carts.push({ side: w.side, wagon: w.id, x: w.x, y: w.y, hp: 100, seen: [w.side === 0, w.side === 1] });
-        w.cartAt = this.time + RULES.cartInterval;
+      if (w.type !== 'supply' || !this.canSendCarts(w) || this.time < w.cartAt) continue;
+      if (this.carts.filter((c) => c.wagon === w.id).length >= RULES.cartsOut) continue;
+      let best: Unit | undefined;
+      let bestNeed = RULES.autoSupplyMinNeed;
+      for (const u of this.units) {
+        if (u.side !== w.side || isSupport(u) || u.state === 'routing' || dist(w, u) > RULES.supplyRange) continue;
+        if (u.suppliedUntil - this.time > RULES.cartLead || this.carts.some((c) => c.target === u.id)) continue;
+        const need = this.supplyNeed(u);
+        if (need > bestNeed) { bestNeed = need; best = u; }
       }
+      if (!best) continue;
+      this.carts.push({ side: w.side, wagon: w.id, target: best.id, x: w.x, y: w.y, hp: 100, seen: [w.side === 0, w.side === 1] });
+      w.cartAt = this.time + RULES.cartInterval;
     }
     this.carts = this.carts.filter((c) => {
       const w = this.unit(c.wagon);
-      if (!w || !w.supplyZone) return false;
+      const t = this.unit(c.target);
+      if (!w || !t || t.state === 'routing') return false;
       for (const e of this.units) {
         if (e.side === c.side || e.state === 'routing' || isSupport(e)) continue;
         const reach = (e.type === 'cavalry' ? 60 : UNIT_TYPES[e.type].range) + unitRadius(e);
@@ -876,15 +867,15 @@ export class World {
         this.lastCartLog[c.side] = this.time;
         return false;
       }
-      const d = dist(c, w.supplyZone);
+      const d = dist(c, t);
       const step = RULES.cartSpeed * DT;
-      // The cart unloads as soon as it reaches the edge of the area.
-      if (d <= step + RULES.supplyAreaRadius * 0.6) {
-        w.supplyLeft = RULES.cartLoad;
+      // The cart unloads as soon as it reaches the regiment's rear.
+      if (d <= step + unitRadius(t) + 20) {
+        t.suppliedUntil = this.time + RULES.cartLoad;
         return false;
       }
-      c.x += ((w.supplyZone.x - c.x) / d) * step;
-      c.y += ((w.supplyZone.y - c.y) / d) * step;
+      c.x += ((t.x - c.x) / d) * step;
+      c.y += ((t.y - c.y) / d) * step;
       for (const side of [0, 1] as Side[]) {
         c.seen[side] = c.side === side || this.units.some((o) => o.side === side && dist(o, c) <= UNIT_TYPES[o.type].sight);
       }
@@ -897,7 +888,7 @@ export class World {
    * and depots you hold when not firing. The supply area also lets tired troops recover.
    */
   private resupply(u: Unit) {
-    const area = this.inSupplyArea(u.side, u);
+    const area = this.isSupplied(u);
     if (area) u.fatigue = Math.max(0, u.fatigue - RULES.supplyFatigueRelief * DT);
     if (u.ammo >= 100) return;
     if (area) {
@@ -1128,9 +1119,9 @@ export class World {
       u.charged.push(e.id);
       const flank = this.flankMultiplier(u, e);
       const vs = e.type === 'cavalry' ? 1 : this.stats(e).vsCavalry;
-      const impact = (22 * flank) / vs;
+      const impact = (16 * flank) / vs;
       e.morale -= impact;
-      this.damage(e, e.men * 0.03 * (flank / vs), u, 1);
+      this.damage(e, e.men * 0.025 * (flank / vs), u, 1);
       if (e.type !== 'cavalry' && formationOf(e) === 'fortified') this.damage(u, u.men * 0.08, e, 2);
     }
   }
