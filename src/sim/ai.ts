@@ -64,7 +64,7 @@ export class AI {
         const score = dist(u, n.pos) - n.need * 150;
         if (score < bestScore) { bestScore = score; best = i; }
       });
-      if (best === -1) best = 2;
+      if (best === -1) best = OBJECTIVES.findIndex((o) => o.centre);
       needs[best].need -= 1;
       assigned.set(u.id, needs[best].pos);
     }

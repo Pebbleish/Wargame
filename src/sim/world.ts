@@ -183,7 +183,7 @@ export class World {
   time = 0;
   units: Unit[] = [];
   sides: [SideState, SideState];
-  owners: (Side | -1)[] = OBJECTIVES.map(() => -1);
+  owners: (Side | -1)[] = [];
   events: GameEvent[] = [];
   result: Result | null = null;
   impacts: Impact[] = [];
@@ -194,6 +194,7 @@ export class World {
 
   constructor(seed = 1, nations: [string, string] = ['Valdmark', 'Ostmark']) {
     generateMap(seed);
+    this.owners = OBJECTIVES.map(() => -1);
     this.rng = new Rng(seed);
     this.sides = [newSide(nations[0]), newSide(nations[1])];
     for (const side of [0, 1] as Side[]) this.placeCore(side);
@@ -201,15 +202,31 @@ export class World {
 
   // ---------- setup ----------
 
+  /** The two towns on a side's own half, where its starting army stands. */
+  homeTowns(side: Side): Vec[] {
+    return OBJECTIVES.filter((o) => o.home === side);
+  }
+
+  /** The starting army garrisons its two home towns; guns and horse wait between them. */
   private placeCore(side: Side) {
-    const core: UnitTypeId[] = ['line', 'line', 'light', 'line', 'line', 'line', 'cavalry', 'artillery'];
-    const ys = [600, 975, 1275, 1500, 1725, 2025, 2550, 1500];
-    const xs = [300, 300, 340, 320, 300, 300, 200, 150];
-    core.forEach((type, i) => {
-      const x = side === 0 ? xs[i] : MAP.width - xs[i];
-      const y = side === 0 ? ys[i] : MAP.height - ys[i];
-      this.spawn(side, type, x, y);
-    });
+    const [a, b] = this.homeTowns(side);
+    const dir = side === 0 ? 1 : -1;
+    const at = (t: Vec, dx: number, dy: number) => ({ x: t.x + dx * dir, y: t.y + dy * dir });
+    const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    const spots: [UnitTypeId, Vec][] = [
+      ['line', at(a, 170, -190)], ['line', at(a, 170, 190)], ['light', at(a, 300, 0)],
+      ['line', at(b, 170, -190)], ['line', at(b, 170, 190)], ['line', at(b, -150, 0)],
+      ['artillery', at(mid, -60, 0)], ['cavalry', at(mid, -320, 0)],
+    ];
+    for (const [type, p] of spots) {
+      const q = clampToMap(p, RULES.borderWidth + 80);
+      this.spawn(side, type, q.x, q.y);
+    }
+  }
+
+  /** During deployment, regiments can be placed in the deployment strip or around their home towns. */
+  canDeployAt(side: Side, p: Vec): boolean {
+    return inZone(side, p) || this.homeTowns(side).some((t) => dist(t, p) <= RULES.townDeployRadius);
   }
 
   spawn(side: Side, type: UnitTypeId, x: number, y: number): Unit {
@@ -307,7 +324,7 @@ export class World {
           if (!u) continue;
           const p = clampToMap(m);
           if (this.phase === 'deploy') {
-            if (!inZone(u.side, p)) continue;
+            if (!this.canDeployAt(u.side, p)) continue;
             u.x = p.x;
             u.y = p.y;
             if (cmd.facing !== undefined) u.facing = cmd.facing;

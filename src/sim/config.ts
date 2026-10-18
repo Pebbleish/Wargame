@@ -118,6 +118,7 @@ export const RULES = {
   captureRadius: 160,
   borderWidth: 40, // impassable strip around the map edge
   edgeDisperseTime: 30, // wavering or routing units pinned at the border this long disperse
+  townDeployRadius: 450, // starting regiments can be repositioned this close to their home towns
   zoneDepth: 600, // depth of each home deployment zone from its map edge
 };
 

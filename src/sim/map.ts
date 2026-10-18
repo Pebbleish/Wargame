@@ -11,6 +11,8 @@ export interface ObjectiveDef {
   kind: ObjectiveKind;
   x: number;
   y: number;
+  home?: 0 | 1; // a starting town of this side
+  centre?: boolean;
 }
 
 export interface Circle { x: number; y: number; r: number }
@@ -97,23 +99,42 @@ export function generateMap(seed: number) {
   const kindA = kind();
   const kindB = rng.next() < 0.7 ? (kindA === 'village' ? 'depot' : 'village') : kindA;
   const label = (k: ObjectiveKind) => pick(rng, k === 'village' ? VILLAGE_NAMES : DEPOT_NAMES, names);
+  // Some maps add one or two more towns between each side's home towns and the centre.
+  const extras: Vec[] = [];
+  const extraCount = [0, 1, 1, 2][Math.floor(rng.next() * 4)];
+  for (let tries = 0; extras.length < extraCount && tries < 200; tries++) {
+    const p = v(rng.range(1050, 1420), rng.range(250, 1750));
+    const river = nearestRiverPoint(p);
+    if (river && (river.d < 260 || riverSide(p) !== -1)) continue;
+    if ([a, b, centre, ...extras].some((q) => dist(p, q) < 520) || dist(p, mirror(p)) < 900) continue;
+    extras.push(p);
+  }
+  const extraKinds = extras.map(() => (rng.next() < 0.75 ? 'village' : 'depot') as ObjectiveKind);
+  const west: Omit<ObjectiveDef, 'id'>[] = [
+    { name: label(kindA), kind: kindA, ...a, home: 0 },
+    { name: label(kindB), kind: kindB, ...b, home: 0 },
+    ...extras.map((p, i) => ({ name: label(extraKinds[i]), kind: extraKinds[i], ...p })),
+  ];
+  const east = west.map((o) => ({ ...o, ...mirror(o), name: label(o.kind), home: o.home === 0 ? (1 as const) : undefined }));
   replace(OBJECTIVES, [
-    { id: 0, name: label(kindA), kind: kindA, ...a },
-    { id: 1, name: label(kindB), kind: kindB, ...b },
-    { id: 2, name: centreName, kind: mapKind === 'river' ? 'bridge' : 'village', ...centre },
-    { id: 3, name: label(kindB), kind: kindB, ...mirror(b) },
-    { id: 4, name: label(kindA), kind: kindA, ...mirror(a) },
-  ]);
+    ...west,
+    { name: centreName, kind: mapKind === 'river' ? 'bridge' as const : 'village' as const, ...centre, centre: true },
+    ...east.reverse(),
+  ].map((o, id) => ({ ...o, id })));
 
   // Roads join the objectives through the centre and run back to both map edges, with side roads
   // over the other crossings (or straight across on open maps).
-  const northObj = OBJECTIVES[3];
+  const northObj = OBJECTIVES.find((o) => o.home === 1 && o.y === MAP.height - b.y)!;
   const upper = crossingsNorth[0];
   replace(ROADS, [
     [{ x: 0, y: a.y }, a, centre, mirror(a), { x: MAP.width, y: MAP.height - a.y }],
     [{ x: 0, y: b.y }, b, centre, mirror(b), { x: MAP.width, y: MAP.height - b.y }],
     upper ? [a, upper, northObj] : [a, northObj],
     upper ? [b, mirror(upper), mirror(a)] : [b, mirror(a)],
+    ...extras.flatMap((p) => {
+      const home = dist(p, a) < dist(p, b) ? a : b;
+      return [[home, p, centre], [mirror(home), mirror(p), centre]];
+    }),
   ]);
 
   // Hills, woods and marshes, scattered on the west half and mirrored, clear of objectives and crossings.
@@ -135,7 +156,9 @@ export function generateMap(seed: number) {
     }
   };
   scatter(Math.floor(rng.next() * 4), 140, 230, HILLS);
-  scatter(2 + Math.floor(rng.next() * 5), 70, 140, WOODS);
+  // How wooded the map is varies from a few copses to thick forest.
+  const woodland = [[0, 2], [2, 4], [3, 6], [6, 10]][Math.floor(rng.next() * 4)];
+  scatter(woodland[0] + Math.floor(rng.next() * (woodland[1] - woodland[0] + 1)), 70, 150, WOODS);
   // Give each wood an irregular outline: extra lobes of trees around its core, mirrored like the rest.
   const cores = WOODS.filter((_, i) => i % 2 === 0);
   for (const core of cores) {

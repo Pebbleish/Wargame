@@ -7,6 +7,12 @@ import { Hud } from './hud';
 import { paintTerrain } from './terrain';
 
 const PLAYER: Side = 0;
+// The view is turned like a chessboard: your side of the map at the bottom, the enemy at the top.
+const VIEW_ROTATION = -Math.PI / 2;
+const COS = Math.cos(VIEW_ROTATION);
+const SIN = Math.sin(VIEW_ROTATION);
+/** A direction on screen, expressed in world coordinates. */
+const screenToWorldDir = (x: number, y: number): Vec => ({ x: x * COS + y * SIN, y: -x * SIN + y * COS });
 const STEP = 1 / RULES.tickRate;
 const SPEEDS = [0.5, 1, 2, 3];
 const COLORS = {
@@ -55,7 +61,8 @@ export class BattleScene extends Phaser.Scene {
     this.overlay = this.add.graphics();
 
     const cam = this.cameras.main;
-    cam.setBounds(0, 0, MAP.width, MAP.height);
+    cam.setRotation(VIEW_ROTATION);
+    cam.setBackgroundColor('#1d1b16');
     this.fitCamera();
     this.scale.on('resize', () => this.fitCamera());
 
@@ -115,22 +122,51 @@ export class BattleScene extends Phaser.Scene {
       }
     }
     for (const o of OBJECTIVES) {
-      this.mapLayer.push(this.add.text(o.x, o.y - 125, o.name, {
+      const above = screenToWorldDir(0, -125);
+      this.mapLayer.push(this.add.text(o.x + above.x, o.y + above.y, o.name, {
         fontFamily: '"EB Garamond", Georgia, serif', fontSize: '34px', color: '#fffaf0', stroke: '#2a2620', strokeThickness: 6,
-      }).setOrigin(0.5).setDepth(-1));
+      }).setOrigin(0.5).setDepth(-1).setRotation(-VIEW_ROTATION));
     }
   }
 
-  /** Start zoomed out so the whole battlefield is visible. */
+  /** Start with the map's width across the screen, looking at your own half. */
   private fitCamera() {
     const cam = this.cameras.main;
-    cam.setZoom(this.minZoom());
-    cam.centerOn(MAP.width / 2, MAP.height / 2);
+    cam.setZoom(Math.max(this.minZoom(), Math.min(cam.width / MAP.height, 0.6)));
+    this.centerOn({ x: MAP.width * 0.3, y: MAP.height / 2 });
+    this.clampCamera();
   }
 
+  /** Zoomed all the way out, the whole battlefield fits on screen. */
   private minZoom(): number {
     const cam = this.cameras.main;
-    return Math.max(cam.width / MAP.width, cam.height / MAP.height);
+    const across = Math.abs(COS) > 0.5 ? [MAP.width, MAP.height] : [MAP.height, MAP.width];
+    return Math.min(cam.width / across[0], cam.height / across[1]);
+  }
+
+  private centerOn(p: Vec) {
+    const cam = this.cameras.main;
+    cam.scrollX = p.x - cam.width / 2;
+    cam.scrollY = p.y - cam.height / 2;
+  }
+
+  /** The world point under a screen position (the camera turns and zooms around the screen centre). */
+  private worldAt(sx: number, sy: number, zoom = this.cameras.main.zoom): Vec {
+    const cam = this.cameras.main;
+    const d = screenToWorldDir((sx - cam.width / 2) / zoom, (sy - cam.height / 2) / zoom);
+    return { x: cam.scrollX + cam.width / 2 + d.x, y: cam.scrollY + cam.height / 2 + d.y };
+  }
+
+  /** Keep the view over the battlefield; when the view is bigger than the map, centre the map. */
+  private clampCamera() {
+    const cam = this.cameras.main;
+    const mid = { x: cam.scrollX + cam.width / 2, y: cam.scrollY + cam.height / 2 };
+    const half = {
+      x: (Math.abs(COS) * cam.width + Math.abs(SIN) * cam.height) / cam.zoom / 2,
+      y: (Math.abs(SIN) * cam.width + Math.abs(COS) * cam.height) / cam.zoom / 2,
+    };
+    const clamp = (v: number, h: number, size: number) => (h * 2 >= size ? size / 2 : Phaser.Math.Clamp(v, h, size - h));
+    this.centerOn({ x: clamp(mid.x, half.x, MAP.width), y: clamp(mid.y, half.y, MAP.height) });
   }
 
   // ---------- input ----------
@@ -151,8 +187,10 @@ export class BattleScene extends Phaser.Scene {
     this.input.on('pointermove', (p: Phaser.Input.Pointer) => {
       this.pointerWorld = { x: p.worldX, y: p.worldY };
       if (this.pan) {
-        cam.scrollX = this.pan.x - (p.x - this.pan.sx) / cam.zoom;
-        cam.scrollY = this.pan.y - (p.y - this.pan.sy) / cam.zoom;
+        const d = screenToWorldDir((p.x - this.pan.sx) / cam.zoom, (p.y - this.pan.sy) / cam.zoom);
+        cam.scrollX = this.pan.x - d.x;
+        cam.scrollY = this.pan.y - d.y;
+        this.clampCamera();
       }
       if (this.drag) {
         this.drag.current = { x: p.worldX, y: p.worldY };
@@ -176,11 +214,14 @@ export class BattleScene extends Phaser.Scene {
     });
 
     this.input.on('wheel', (p: Phaser.Input.Pointer, _over: unknown, _dx: number, dy: number) => {
-      const before = { x: p.worldX, y: p.worldY };
+      // Zoom toward the pointer: the ground under it stays under it.
+      const before = this.worldAt(p.x, p.y);
       const zoom = Phaser.Math.Clamp(cam.zoom * (dy > 0 ? 0.88 : 1.14), this.minZoom(), 2.5);
+      const after = this.worldAt(p.x, p.y, zoom);
       cam.setZoom(zoom);
-      cam.scrollX = before.x - cam.width * 0.5 - (p.x - cam.width * 0.5) / zoom;
-      cam.scrollY = before.y - cam.height * 0.5 - (p.y - cam.height * 0.5) / zoom;
+      cam.scrollX += before.x - after.x;
+      cam.scrollY += before.y - after.y;
+      this.clampCamera();
     });
 
     window.addEventListener('keydown', (e) => {
@@ -368,10 +409,17 @@ export class BattleScene extends Phaser.Scene {
   private panCamera(delta: number) {
     const cam = this.cameras.main;
     const v = (900 / cam.zoom) * (delta / 1000);
-    if (this.keys['a'] || this.keys['arrowleft']) cam.scrollX -= v;
-    if (this.keys['d'] || this.keys['arrowright']) cam.scrollX += v;
-    if (this.keys['w'] || this.keys['arrowup']) cam.scrollY -= v;
-    if (this.keys['s'] || this.keys['arrowdown']) cam.scrollY += v;
+    let sx = 0;
+    let sy = 0;
+    if (this.keys['a'] || this.keys['arrowleft']) sx -= v;
+    if (this.keys['d'] || this.keys['arrowright']) sx += v;
+    if (this.keys['w'] || this.keys['arrowup']) sy -= v;
+    if (this.keys['s'] || this.keys['arrowdown']) sy += v;
+    if (!sx && !sy) return;
+    const d = screenToWorldDir(sx, sy);
+    cam.scrollX += d.x;
+    cam.scrollY += d.y;
+    this.clampCamera();
   }
 
   // ---------- drawing ----------
@@ -394,6 +442,16 @@ export class BattleScene extends Phaser.Scene {
     this.zones.lineBetween(RULES.zoneDepth, 0, RULES.zoneDepth, MAP.height);
     this.zones.lineStyle(3, COLORS[1].fill, 0.35);
     this.zones.lineBetween(MAP.width - RULES.zoneDepth, 0, MAP.width - RULES.zoneDepth, MAP.height);
+
+    // During deployment, starting regiments can also be placed around your home towns.
+    if (w.phase === 'deploy') {
+      for (const t of w.homeTowns(PLAYER)) {
+        this.zones.fillStyle(COLORS[0].fill, 0.12);
+        this.zones.fillCircle(t.x, t.y, RULES.townDeployRadius);
+        this.zones.lineStyle(3, COLORS[0].fill, 0.5);
+        this.zones.strokeCircle(t.x, t.y, RULES.townDeployRadius);
+      }
+    }
 
     // Earthworks and pontoon bridges built by engineers.
     for (const e of EARTHWORKS) {
@@ -634,14 +692,19 @@ export class BattleScene extends Phaser.Scene {
     g.lineStyle(selected ? 5 : 2.5, outline, alpha);
     g.strokePoints(c, true);
 
-    // Morale bar above the block.
+    // Morale bar above the block, as seen on screen.
     if (u.morale < 99.5 || selected) {
-      const bx = u.x - 30;
-      const by = u.y - Math.max(unitSize(u).w, unitSize(u).d) / 2 - 18;
+      const up = screenToWorldDir(0, -1);
+      const right = screenToWorldDir(1, 0);
+      const lift = Math.max(unitSize(u).w, unitSize(u).d) / 2 + 18;
+      const bar = (from: number, len: number, h: number): Vec[] => {
+        const o = { x: u.x + up.x * lift + right.x * from, y: u.y + up.y * lift + right.y * from };
+        return [o, { x: o.x + right.x * len, y: o.y + right.y * len }, { x: o.x + right.x * len + up.x * h, y: o.y + right.y * len + up.y * h }, { x: o.x + up.x * h, y: o.y + up.y * h }];
+      };
       g.fillStyle(0x1d1b16, 0.7);
-      g.fillRect(bx - 1, by - 1, 62, 9);
+      g.fillPoints(bar(-31, 62, 9), true);
       g.fillStyle(u.morale < RULES.waveringAt ? 0xd35400 : 0x7fc25b, 1);
-      g.fillRect(bx, by, (60 * Math.max(0, u.morale)) / 100, 7);
+      g.fillPoints(bar(-30, (60 * Math.max(0, u.morale)) / 100, 7), true);
     }
 
     if (u.meleeWith !== null) {
