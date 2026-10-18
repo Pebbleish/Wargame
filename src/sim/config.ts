@@ -161,6 +161,7 @@ export const RULES = {
   moraleRecovery: 0.6, // per second when not under pressure
   fortifyTime: 10, // digging in (only possible out of combat) takes this long before the bonuses apply
   artilleryFortifyTime: 5, // guns have to set up (fortify) before they can fire
+  retaliateRange: 450, // idle troops only go after attackers this close (or within 1.5x their own range)
   combatRange: 500, // a unit with a visible enemy this close, or under fire, counts as in combat
   moveSpeedScale: 4.5, // multiplies every unit's base speed
 

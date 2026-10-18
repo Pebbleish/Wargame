@@ -351,18 +351,53 @@ export class BattleScene extends Phaser.Scene {
         this.world.apply({ kind: 'attack', side: PLAYER, ids: sel.map((u) => u.id), target: target.id });
         return;
       }
-      this.world.apply({ kind: 'move', side: PLAYER, moves: this.groupMove(sel, end), facing: this.groupFacing(sel, end) });
+      const { moves, facing } = this.formationAt(sel, end);
+      this.world.apply({ kind: 'move', side: PLAYER, moves, facing });
       return;
     }
     const { moves, facing } = this.lineMove(sel, d.start, end);
     this.world.apply({ kind: 'move', side: PLAYER, moves, facing });
   }
 
-  /** Keep the group's shape and move it so its centre lands on the target. */
-  private groupMove(sel: Unit[], target: Vec) {
-    const cx = sel.reduce((a, u) => a + u.x, 0) / sel.length;
-    const cy = sel.reduce((a, u) => a + u.y, 0) / sel.length;
-    return sel.map((u) => ({ id: u.id, x: target.x + (u.x - cx), y: target.y + (u.y - cy) }));
+  /**
+   * A right-click with several regiments selected forms them up together at the target, facing the way they march:
+   * fighting regiments in front, up to five abreast, with guns, horse and support in the rows behind.
+   */
+  private formationAt(sel: Unit[], target: Vec): { moves: { id: number; x: number; y: number }[]; facing: number | undefined } {
+    const facing = this.groupFacing(sel, target);
+    if (sel.length === 1) return { moves: [{ id: sel[0].id, x: target.x, y: target.y }], facing };
+    const f = facing ?? sel.reduce((a, u) => a + u.facing, 0) / sel.length;
+    const ahead = { x: Math.cos(f), y: Math.sin(f) };
+    const across = { x: -ahead.y, y: ahead.x };
+    const rank = (u: Unit) => (u.type === 'line' || u.type === 'light' || u.type === 'engineers' ? 0 : u.type === 'cavalry' ? 1 : 2);
+    const ordered = [...sel].sort((u, v) => rank(u) - rank(v));
+    const rows: Unit[][] = [];
+    for (const u of ordered) {
+      const row = rows[rows.length - 1];
+      if (!row || row.length >= 5 || rank(row[0]) !== rank(u)) rows.push([u]);
+      else row.push(u);
+    }
+    const size = (u: Unit) => unitSize({ type: u.type, formation: u.formation === 'marching' ? 'formation' : u.formation });
+    const moves: { id: number; x: number; y: number }[] = [];
+    let back = 0;
+    for (const row of rows) {
+      // Keep each row in the left-to-right order the regiments already stand in, so nobody crosses paths.
+      row.sort((u, v) => (u.x * across.x + u.y * across.y) - (v.x * across.x + v.y * across.y));
+      const widths = row.map((u) => size(u).w + 10);
+      const total = widths.reduce((a, w) => a + w, 0);
+      const depth = Math.max(...row.map((u) => size(u).d));
+      let along = -total / 2;
+      row.forEach((u, i) => {
+        const c = along + widths[i] / 2;
+        along += widths[i];
+        moves.push({ id: u.id, x: target.x + across.x * c - ahead.x * (back + depth / 2), y: target.y + across.y * c - ahead.y * (back + depth / 2) });
+      });
+      back += depth + 40;
+    }
+    // The front row lands on the click.
+    const shift = (rows.length ? Math.max(...rows[0].map((u) => size(u).d)) / 2 : 0);
+    for (const m of moves) { m.x += ahead.x * shift; m.y += ahead.y * shift; }
+    return { moves, facing: f };
   }
 
   private groupFacing(sel: Unit[], target: Vec): number | undefined {
@@ -381,7 +416,7 @@ export class BattleScene extends Phaser.Scene {
     const facing = Math.atan2(-dx, dy);
     // Order units along the line by where they stand now, so they do not cross each other.
     const sorted = [...sel].sort((u, v) => (u.x * dir.x + u.y * dir.y) - (v.x * dir.x + v.y * dir.y));
-    const widths = sorted.map((u) => unitSize({ type: u.type, formation: u.formation }).w + 20);
+    const widths = sorted.map((u) => unitSize({ type: u.type, formation: u.formation === 'marching' ? 'formation' : u.formation }).w + 10);
     const needed = widths.reduce((s, w) => s + w, 0);
     const span = Math.max(len, needed);
     const gap = (span - needed) / Math.max(1, sorted.length - 1);
@@ -629,9 +664,11 @@ export class BattleScene extends Phaser.Scene {
       this.drawUnit(g, view, now);
     }
 
-    // Orders of the selected regiments.
+    // Orders of the selected regiments, with an outline of where each one will stand.
     for (const u of this.selectedUnits()) {
       if (u.order.kind === 'move') {
+        const dest = { type: u.type, formation: u.formation === 'marching' ? 'formation' as const : u.formation, x: u.order.x, y: u.order.y, facing: u.order.facing ?? u.facing };
+        this.blockOutline(o, dest, 0xfffaf0, 0.55);
         const pts = [u as Vec, ...u.waypoints];
         o.lineStyle(4, 0xfffaf0, 0.8);
         for (let i = 0; i < pts.length - 1; i++) o.lineBetween(pts[i].x, pts[i].y, pts[i + 1].x, pts[i + 1].y);
@@ -653,6 +690,17 @@ export class BattleScene extends Phaser.Scene {
     if (d && d.moved && d.button === 0 && !d.panning && !this.pendingCallIn) {
       o.lineStyle(2, 0xfffaf0, 0.9);
       o.strokeRect(Math.min(d.start.x, d.current.x), Math.min(d.start.y, d.current.y), Math.abs(d.current.x - d.start.x), Math.abs(d.current.y - d.start.y));
+    }
+    // Holding the right button shows where a group will form up before it is let go.
+    if (d && !d.moved && d.button === 2 && !this.pendingCallIn && !this.aiming && !this.unitAt(d.current)) {
+      const sel = this.selectedUnits();
+      if (sel.length > 1) {
+        const { moves, facing } = this.formationAt(sel, d.current);
+        for (const m of moves) {
+          const u = sel.find((s) => s.id === m.id)!;
+          this.blockOutline(o, { ...u, formation: u.formation === 'marching' ? 'formation' : u.formation, x: m.x, y: m.y, facing: facing ?? u.facing }, 0xfffaf0, 0.8);
+        }
+      }
     }
     if (d && d.moved && d.button === 2) {
       const sel = this.selectedUnits();

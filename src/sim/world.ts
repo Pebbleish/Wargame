@@ -933,6 +933,8 @@ export class World {
     }
     // Holding and fortified units fight back from where they are (they already return fire in range).
     if (u.holdPosition || u.formation === 'fortified' || u.building > 0 || isSupport(u)) return;
+    // Distant attackers (a battery shelling from across the field) are not worth a long charge into the open.
+    if (dist(u, a) > Math.max(RULES.retaliateRange, UNIT_TYPES[u.type].range * 1.5)) return;
     u.order = { kind: 'attack', target: a.id, retaliate: true };
     u.waypoints = planRoute(u, a);
     u.group = 0;
