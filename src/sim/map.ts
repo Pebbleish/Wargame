@@ -183,6 +183,76 @@ export function generateMap(seed: number) {
   // Marshes vary too: none to several, each a spread of boggy lobes rather than a neat circle.
   scatter(Math.floor(rng.next() * 4), 70, 140, MARSHES);
   addLobes(MARSHES, 1, 4);
+  windRoads(rng);
+}
+
+/**
+ * Turn the straight road legs into country roads: they wander gently, bend around woods and marshes, and
+ * still run through every town and crossing they join. The bends mirror across the centre like the rest of the map.
+ */
+function windRoads(rng: Rng) {
+  const waves = [0, 1, 2, 3].map(() => ({ fx: rng.range(-1, 1), fy: rng.range(-1, 1), k: (Math.PI * 2) / rng.range(700, 1400), phase: rng.range(0, Math.PI * 2) }));
+  const noise = (p: Vec, axis: number) => waves.reduce((sum, w, i) => sum + Math.sin((p.x * w.fx + p.y * w.fy) * w.k + w.phase + axis * (i + 1) * 1.7), 0) / 2;
+  // Subtracting the mirrored value keeps the bends point-symmetric: the far side's roads mirror ours.
+  const drift = (p: Vec): Vec => {
+    const m = mirror(p);
+    return { x: (noise(p, 0) - noise(m, 0)) * 80, y: (noise(p, 1) - noise(m, 1)) * 80 };
+  };
+  // Every town, crossing and road end, so roads that share a stretch bend the same way along it.
+  const knots = ROADS.flat();
+  const wind = (route: Vec[]): Vec[] => {
+    const pts: Vec[] = [];
+    for (let i = 0; i < route.length - 1; i++) {
+      const a = route[i];
+      const b = route[i + 1];
+      const n = Math.max(1, Math.round(dist(a, b) / 40));
+      for (let k = i === 0 ? 0 : 1; k <= n; k++) pts.push({ x: a.x + ((b.x - a.x) * k) / n, y: a.y + ((b.y - a.y) * k) / n });
+    }
+    const bent = pts.map((p) => {
+      // Fixed at the towns and crossings it joins, free to wander in between.
+      const near = Math.min(...knots.map((q) => dist(p, q)));
+      const ease = Math.min(1, near / 300) ** 2;
+      const d = drift(p);
+      let q = { x: p.x + d.x * ease, y: p.y + d.y * ease };
+      // Lean away from marshes; roads are happy to run through woods.
+      for (const o of MARSHES) {
+        const gap = dist(q, o);
+        const want = o.r + 120;
+        if (gap < want && gap > 0) {
+          const push = (want - gap) * 0.7 * ease;
+          q = { x: q.x + ((q.x - o.x) / gap) * push, y: q.y + ((q.y - o.y) / gap) * push };
+        }
+      }
+      // Never wander over the river away from a crossing.
+      return RIVER.length && riverSide(q) !== riverSide(p) ? p : q;
+    });
+    // Round off the corners.
+    let line = bent;
+    for (let it = 0; it < 2; it++) {
+      const next = [line[0]];
+      for (let i = 0; i < line.length - 1; i++) {
+        const a = line[i];
+        const b = line[i + 1];
+        next.push({ x: a.x * 0.75 + b.x * 0.25, y: a.y * 0.75 + b.y * 0.25 }, { x: a.x * 0.25 + b.x * 0.75, y: a.y * 0.25 + b.y * 0.75 });
+      }
+      next.push(line[line.length - 1]);
+      line = next;
+    }
+    return line;
+  };
+  replace(ROADS, ROADS.map(wind));
+  // Mark the road onto a fine grid once, so terrain lookups are a single read.
+  ROAD_GRID.fill(0);
+  for (const r of ROADS) for (let i = 0; i < r.length - 1; i++) {
+    const p = r[i];
+    const q = r[i + 1];
+    for (let gx = Math.floor((Math.min(p.x, q.x) - ROAD_HALF_WIDTH) / ROAD_CELL); gx <= (Math.max(p.x, q.x) + ROAD_HALF_WIDTH) / ROAD_CELL; gx++) {
+      for (let gy = Math.floor((Math.min(p.y, q.y) - ROAD_HALF_WIDTH) / ROAD_CELL); gy <= (Math.max(p.y, q.y) + ROAD_HALF_WIDTH) / ROAD_CELL; gy++) {
+        if (gx < 0 || gy < 0 || gx >= ROAD_COLS || gy >= ROAD_ROWS) continue;
+        if (distToSegment({ x: (gx + 0.5) * ROAD_CELL, y: (gy + 0.5) * ROAD_CELL }, p, q) <= ROAD_HALF_WIDTH) ROAD_GRID[gy * ROAD_COLS + gx] = 1;
+      }
+    }
+  }
 }
 
 export function addEarthwork(side: 0 | 1, p: Vec) {
@@ -209,9 +279,18 @@ export function addPontoon(p: Vec) {
   CROSSINGS.push({ x: p.x, y: p.y, name: 'Pontoon bridge', ford: false, pontoon: true });
 }
 
-generateMap(1);
 
 const ROAD_HALF_WIDTH = 25;
+const ROAD_CELL = 10;
+const ROAD_COLS = Math.ceil(MAP.width / ROAD_CELL);
+const ROAD_ROWS = Math.ceil(MAP.height / ROAD_CELL);
+const ROAD_GRID = new Uint8Array(ROAD_COLS * ROAD_ROWS);
+
+function onRoad(p: Vec): boolean {
+  const gx = Math.floor(p.x / ROAD_CELL);
+  const gy = Math.floor(p.y / ROAD_CELL);
+  return gx >= 0 && gy >= 0 && gx < ROAD_COLS && gy < ROAD_ROWS && ROAD_GRID[gy * ROAD_COLS + gx] === 1;
+}
 
 export function dist(a: Vec, b: Vec): number {
   return Math.hypot(a.x - b.x, a.y - b.y);
@@ -224,12 +303,6 @@ function distToSegment(p: Vec, a: Vec, b: Vec): number {
   let t = len2 === 0 ? 0 : ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2;
   t = Math.max(0, Math.min(1, t));
   return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
-}
-
-function distToPolyline(p: Vec, line: Vec[]): number {
-  let best = Infinity;
-  for (let i = 0; i < line.length - 1; i++) best = Math.min(best, distToSegment(p, line[i], line[i + 1]));
-  return best;
 }
 
 function inCircles(p: Vec, circles: Circle[]): boolean {
@@ -255,7 +328,7 @@ export function terrainAt(p: Vec): Terrain {
   const woods = inCircles(p, WOODS);
   const hill = inCircles(p, HILLS);
   const village = OBJECTIVES.some((o) => o.kind !== 'bridge' && dist(p, o) <= VILLAGE_RADIUS);
-  const road = ROADS.some((r) => distToPolyline(p, r) <= ROAD_HALF_WIDTH);
+  const road = onRoad(p);
   const crossing = nearCrossing(p);
   const marsh = inCircles(p, MARSHES);
   const works = inCircles(p, EARTHWORKS);
@@ -319,3 +392,5 @@ export function clampToMap(p: Vec, margin = 80): Vec {
     y: Math.max(margin, Math.min(MAP.height - margin, p.y)),
   };
 }
+
+generateMap(1);
