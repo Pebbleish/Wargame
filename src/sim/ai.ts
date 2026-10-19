@@ -1,5 +1,5 @@
 import { MAP, RULES, UNIT_TYPES, UnitTypeId } from './config';
-import { CROSSINGS, EARTHWORKS, OBJECTIVES, Terrain, Vec, clampToMap, dist, terrainAt } from './map';
+import { CROSSINGS, EARTHWORKS, OBJECTIVES, RIVER, Terrain, Vec, clampToMap, crossesRiver, dist, riverSide, terrainAt } from './map';
 import { Habits } from './habits';
 import { Command, Side, Unit, World, angleDiff, formationOf, isSupport } from './world';
 
@@ -125,6 +125,8 @@ export const PARAMS = {
   requisitionMorale: 50, // only above this army morale
   requisitionLead: -5, // and this far ahead of the enemy's (negative: no further behind than this)
   callAtAttack: 1, // reinforcements arrive on the flank of the map an attack is going in on
+  flankCross: 1, // an attack over a defended river crossing forms up across another, quieter one instead (0 never)
+  flankOdds: 0.5, // when the enemy near that crossing is at most this share of the defence of the direct way
   look: 0, // before launching an attack, plays the battle forward to see whether attacking beats holding (0 never: no gain in tests yet)
   lookAhead: 75, // seconds of battle each look-ahead plays forward
   lookTicks: 8, // look-ahead ticks played per battle tick, so the look is spread over a few seconds of battle
@@ -226,7 +228,9 @@ export class AI {
   private look: Look | null = null;
   private lookAt = 60;
   private verdict: { target: number | null; at: number } | null = null; // what the last look-ahead decided
-  private fixed: number | null | undefined = undefined; // in a look-ahead copy: the attack it must make (null: none)
+  private fixed: number | null | undefined = undefined;
+  private flankFor: number | null = null; // the attack the flank crossing below was chosen for
+  private flank: Vec | null = null; // where that attack forms up beyond a quieter crossing, if anywhere // in a look-ahead copy: the attack it must make (null: none)
 
   /** Battle plan from the battle's seed (or given), so a replay of the same seed fights the same way. */
   constructor(readonly side: Side, seed = 1, opts: AIOptions = {}) {
@@ -318,7 +322,7 @@ export class AI {
     return OBJECTIVES.map((o, i) => {
       const enemyNear = world.units.filter((u) => u.side !== this.side && u.seen[this.side] && u.state !== 'routing' && dist(u, o) < 600).length;
       const owned = world.owners[i] === this.side;
-      let need = o.kind === 'bridge' ? 3 : 2;
+      let need = o.centre && o.kind === 'bridge' ? 3 : 2;
       if (owned && enemyNear === 0) {
         // A town we hold is only garrisoned while the enemy is within striking distance of it (further for home
         // towns, since losing everything loses the battle).
@@ -999,11 +1003,46 @@ export class AI {
   private stagingPoint(mine: Unit[]): Vec {
     const t = OBJECTIVES[this.plan.target!];
     const from = this.frontAnchor(mine);
+    // Settled once per attack, so the group does not swing between two ways in.
+    if (this.flankFor !== this.plan.target) {
+      this.flankFor = this.plan.target;
+      this.flank = this.params.flankCross > 0 ? this.flankCrossing(from, t) : null;
+    }
+    if (this.flank) return this.flank;
     let dx = from.x - t.x;
     let dy = from.y - t.y;
     const len = Math.hypot(dx, dy);
     if (len < 200) { dx = -this.dir(); dy = 0; } else { dx /= len; dy /= len; }
     return clampToMap({ x: t.x + dx * 600, y: t.y + dy * 600 }, RULES.borderWidth + 100);
+  }
+
+  /**
+   * When the objective lies over the river (or is a bridge) and the direct way is defended, a quieter crossing to
+   * form up beyond, so the attack comes in from the enemy's bank or flank instead of straight over the bridge.
+   */
+  private flankCrossing(from: Vec, t: Vec & { kind: string }): Vec | null {
+    if (!RIVER.length) return null;
+    const onRiver = t.kind === 'bridge';
+    if (!onRiver && !crossesRiver(from, t)) return null;
+    const direct = this.enemyPowerNear(t, 600);
+    if (direct <= 0) return null;
+    const ourBank = riverSide(from);
+    let best: Vec | null = null;
+    let bestCost = Infinity;
+    for (const c of CROSSINGS) {
+      if (dist(c, t) < 300) continue; // that is the direct way
+      const held = this.enemyPowerNear(c, 500);
+      if (held > direct * this.params.flankOdds) continue;
+      const landing = { x: c.x + this.dir() * 260, y: c.y };
+      if (riverSide(landing) === ourBank) continue;
+      const cost = dist(from, c) + dist(c, t) + held;
+      if (cost < bestCost) { bestCost = cost; best = landing; }
+    }
+    if (!best) return null;
+    // Form up a little way from the landing towards the objective, still clear of musket range.
+    const d = dist(best, t);
+    const k = d > 700 ? Math.min(0.5, (d - 600) / d) : 0;
+    return clampToMap({ x: best.x + (t.x - best.x) * k, y: best.y + (t.y - best.y) * k }, RULES.borderWidth + 100);
   }
 
   /**

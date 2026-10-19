@@ -2,7 +2,7 @@ import Phaser from 'phaser';
 import { MAP, RULES, UNIT_TYPES, UnitTypeId } from '../sim/config';
 import { AI } from '../sim/ai';
 import { HabitWatcher, mergeHabits, parseHabits } from '../sim/habits';
-import { CROSSINGS, EARTHWORKS, OBJECTIVES, Vec, dist, planRoute, terrainAt } from '../sim/map';
+import { CROSSINGS, EARTHWORKS, OBJECTIVES, Vec, dist, terrainAt } from '../sim/map';
 import { Side, Unit, World, experienceOf, formationOf, inZone, isSupport, unitRadius, unitSize } from '../sim/world';
 import { Hud } from './hud';
 import { paintTerrain } from './terrain';
@@ -886,7 +886,7 @@ export class BattleScene extends Phaser.Scene {
         // The way each regiment will go, round the river by the nearest crossing where it has to.
         const key = `${Math.round(d.current.x / 20)},${Math.round(d.current.y / 20)}:${sel.map((u) => u.id).join(',')}`;
         if (this.routePreview.key !== key) {
-          this.routePreview = { key, paths: moves.slice(0, 12).map((m) => { const u = sel.find((s) => s.id === m.id)!; return [u, ...planRoute(u, m)]; }) };
+          this.routePreview = { key, paths: moves.slice(0, 12).map((m) => { const u = sel.find((s) => s.id === m.id)!; return [u, ...this.world.route(u, m)]; }) };
         }
         o.lineStyle(3, 0xfffaf0, 0.45);
         for (const path of this.routePreview.paths) for (let i = 0; i < path.length - 1; i++) o.lineBetween(path[i].x, path[i].y, path[i + 1].x, path[i + 1].y);

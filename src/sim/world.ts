@@ -482,7 +482,7 @@ export class World {
           }
           u.order = { kind: 'move', x: p.x, y: p.y, facing: cmd.facing };
           u.holdPosition = false;
-          u.waypoints = planRoute(u, p);
+          u.waypoints = this.route(u, p);
           u.meleeWith = null;
           u.group = group;
         }
@@ -501,7 +501,7 @@ export class World {
           }
           u.order = { kind: 'attack', target: target.id };
           u.holdPosition = false;
-          u.waypoints = planRoute(u, target);
+          u.waypoints = this.route(u, target);
           u.group = 0;
         }
         break;
@@ -613,7 +613,7 @@ export class World {
       const stop = UNIT_TYPES.artillery.range * 0.9;
       const p = clampToMap({ x: at.x + ((u.x - at.x) / d) * stop, y: at.y + ((u.y - at.y) / d) * stop });
       u.order = { kind: 'move', x: p.x, y: p.y };
-      u.waypoints = planRoute(u, p);
+      u.waypoints = this.route(u, p);
       u.group = 0;
       if (u.formation === 'fortified') u.formation = 'formation';
       return;
@@ -785,7 +785,30 @@ export class World {
     const t = terrainAt(u);
     if (u.state === 'routing') return def.speed * RULES.moveSpeedScale * 1.1 * Math.max(0.6, t.speed);
     const pace = this.groupSpeed.get(u.group);
-    return Math.min(this.baseSpeed(u), pace ?? Infinity) * t.speed;
+    return Math.min(this.baseSpeed(u), pace ?? Infinity) * t.speed * this.traffic(u);
+  }
+
+  /** A bridge or ford only takes so many at once: each other regiment on it slows the crossing. */
+  private traffic(u: Unit): number {
+    const c = nearCrossing(u);
+    if (!c) return 1;
+    let others = 0;
+    for (const o of this.units) if (o !== u && o.state !== 'routing' && dist(o, c) < RULES.crossingCrowd) others++;
+    return Math.max(RULES.crossingMinPace, 1 / (1 + RULES.crossingSlow * others));
+  }
+
+  /** A route for a regiment, steering round crossings that are jammed or that the enemy is seen to hold. */
+  route(u: Unit, p: Vec): Vec[] {
+    return planRoute(u, p, (c) => {
+      let cost = 0;
+      for (const o of this.units) {
+        if (o === u || o.state === 'routing' || isSupport(o)) continue;
+        const d = dist(o, c);
+        if (o.side !== u.side && o.seen[u.side] && d < RULES.crossingHeldRange) cost += RULES.crossingHeldCost;
+        else if (o.side === u.side && d < RULES.crossingCrowd) cost += RULES.crossingCrowdCost;
+      }
+      return cost;
+    });
   }
 
   private turnRate(u: Unit): number {
@@ -828,7 +851,7 @@ export class World {
         const standOff = def.range > 0 && (u.type !== 'line' || u.order.retaliate) ? def.range * 0.8 : 0;
         if (standOff > 0 && d <= standOff) goal = null;
         else {
-          if (u.waypoints.length === 0 || dist(u.waypoints[u.waypoints.length - 1], target) > 60) u.waypoints = planRoute(u, target);
+          if (u.waypoints.length === 0 || dist(u.waypoints[u.waypoints.length - 1], target) > 60) u.waypoints = this.route(u, target);
           goal = u.waypoints[0];
         }
       }
@@ -1072,7 +1095,7 @@ export class World {
     const stop = RULES.supplyRange * 0.6;
     const p = clampToMap({ x: wagons.x + ((u.x - wagons.x) / wd) * stop, y: wagons.y + ((u.y - wagons.y) / wd) * stop });
     u.order = { kind: 'move', x: p.x, y: p.y };
-    u.waypoints = planRoute(u, p);
+    u.waypoints = this.route(u, p);
     u.group = 0;
     u.note = 'ammo';
     u.noteFor = u.order;
@@ -1106,7 +1129,7 @@ export class World {
     // Nor is leaving position for an attacker that is dug in, in cover, or stronger: stand and return fire instead.
     if (this.smarts[u.side].bait && (formationOf(a) === 'fortified' || terrainAt(a).cover < 1 || this.strength(a) > this.strength(u) * 1.2)) return;
     u.order = { kind: 'attack', target: a.id, retaliate: true };
-    u.waypoints = planRoute(u, a);
+    u.waypoints = this.route(u, a);
     u.group = 0;
   }
 
@@ -1173,7 +1196,7 @@ export class World {
     const next = { x: u.x + Math.cos(desired) * step, y: u.y + Math.sin(desired) * step };
 
     if (crossesRiver(u, next) && !nearCrossing(u) && !nearCrossing(next)) {
-      u.waypoints = planRoute(u, final);
+      u.waypoints = this.route(u, final);
       return;
     }
 

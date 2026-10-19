@@ -176,7 +176,7 @@ export class Hud {
       <details><summary>Supply, fatigue and reinforcements</summary>
         <p>Below ${RULES.lowAmmo}% ammunition fire is halved; at 0 it stops. Standing wagons send carts to regiments within ${RULES.supplyRange}m (green ring), which can be shot up on the way. Held depots and your deployment zone refill slowly. Marching, charging and melee tire troops; rest restores them. Call in troops from the bar on the left, then click in your deployment zone; they arrive green and gain experience in battle (gold pips).</p></details>
       <details><summary>Guns, engineers and terrain</summary>
-        <p>Guns set up before firing. Engineers (${k('E')}) build earthworks or a pontoon bridge at a river (${RULES.maxWorks} per side), and nearby troops dig in twice as fast. Woods hide units beyond ${RULES.woodsSpotRange}m; firing guns give themselves away.</p></details>
+        <p>Guns set up before firing. Engineers (${k('E')}) build earthworks or a pontoon bridge at a river (${RULES.maxWorks} per side), and nearby troops dig in twice as fast. Woods hide units beyond ${RULES.woodsSpotRange}m; firing guns give themselves away.</p><p>On river maps the outer bridge on each half is an objective too. Bridges jam: every regiment on one slows the rest, and orders route round crossings that are crowded or held by the enemy.</p></details>
       <details><summary>What regiments do on their own</summary>
         <p>Between orders they shoot the shakiest enemy in front, face charging cavalry, avoid ground being shelled, won't chase a stronger or dug-in enemy, step back when wavering, and walk to the wagons when out of ammunition. ${k('H')} keeps them in place.</p></details>
       <p style="margin-top:8px"><button data-a="close">Got it</button></p>`;

@@ -49,7 +49,8 @@ export const EARTHWORK_RADIUS = 90;
 
 const VILLAGE_NAMES = ['Westbrook', 'Kessel', 'Hollin', 'Marrau', 'Dornach', 'Aschfeld', 'Felden', 'Brackwitz', 'Ulmen', 'Sorau'];
 const DEPOT_NAMES = ['Linden Depot', 'Ostrava Depot', 'Gorse Depot', 'Halden Depot', 'Pellau Depot', 'Rothen Depot', 'Kreuz Depot', 'Marl Depot', 'Tessin Depot', 'Wendel Depot'];
-const BRIDGE_NAMES = ['Mill Bridge', 'Stone Bridge', 'Toll Bridge', 'Abbey Bridge'];
+const BRIDGE_NAMES = ['Mill Bridge', 'Stone Bridge', 'Toll Bridge', 'Abbey Bridge', 'Weir Bridge', 'Cart Bridge', 'Kings Bridge'];
+const FORD_NAMES = ['Shallow Ford', 'Cattle Ford', 'Ferry Ford', 'Ash Ford'];
 
 function pick<T>(rng: Rng, list: T[], taken: Set<T>): T {
   const free = list.filter((x) => !taken.has(x));
@@ -74,21 +75,16 @@ export function generateMap(seed: number) {
   const centre = v(1600, 1000);
 
   // River: wanders from the north edge to the centre; the southern half is the mirror image.
-  // It has a bridge in the middle and one or two more bridges or fords on each half.
+  // It has a bridge in the middle and two more crossings on each half: a bridge near the centre, so a force held
+  // at the middle bridge can go round, and an outer bridge or ford that is an objective of its own.
   let crossingsNorth: Crossing[] = [];
   if (mapKind === 'river') {
     const north = [0, 210, 420, 630, 830].map((y, i) => v(1600 + rng.range(-150, 150) * (1 - i * 0.15), i === 0 ? 0 : y + rng.range(-50, 50)));
     replace(RIVER, [...north, centre, ...north.slice().reverse().map(mirror)]);
-    // Fisher-Yates with the seeded generator, so every browser draws the same map.
-    const order = [1, 2, 3];
-    for (let i = order.length - 1; i > 0; i--) {
-      const j = Math.floor(rng.next() * (i + 1));
-      [order[i], order[j]] = [order[j], order[i]];
-    }
-    const spots = order.slice(0, 1 + Math.floor(rng.next() * 2)).sort();
-    crossingsNorth = spots.map((i, k) => {
-      const ford = rng.next() < 0.6;
-      return { ...north[i], name: `${ford ? 'Ford' : 'Bridge'} ${k + 1}`, ford };
+    const outer = rng.next() < 0.5 ? 1 : 2;
+    crossingsNorth = [outer, 3].map((i, k) => {
+      const ford = k === 0 && rng.next() < 0.3;
+      return { ...north[i], name: k === 0 ? pick(rng, ford ? FORD_NAMES : BRIDGE_NAMES, names) : 'Bridge', ford };
     });
   } else {
     replace(RIVER, []);
@@ -97,7 +93,7 @@ export function generateMap(seed: number) {
   replace(CROSSINGS, mapKind === 'river' ? [
     ...crossingsNorth,
     { ...centre, name: centreName, ford: false },
-    ...crossingsNorth.map((c) => ({ ...c, ...mirror(c) })),
+    ...crossingsNorth.map((c, k) => ({ ...c, ...mirror(c), name: k === 0 ? pick(rng, c.ford ? FORD_NAMES : BRIDGE_NAMES, names) : c.name })),
   ] : []);
 
   // Objectives: two on each side in mirrored spots, plus the centre (a bridge, or a village on open maps).
@@ -115,7 +111,7 @@ export function generateMap(seed: number) {
     const p = v(rng.range(1050, 1420), rng.range(250, 1750));
     const river = nearestRiverPoint(p);
     if (river && (river.d < 260 || riverSide(p) !== -1)) continue;
-    if ([a, b, centre, ...extras].some((q) => dist(p, q) < 520) || dist(p, mirror(p)) < 900) continue;
+    if ([a, b, centre, ...crossingsNorth, ...extras].some((q) => dist(p, q) < 520) || dist(p, mirror(p)) < 900) continue;
     // Its road to the centre must reach the bridge without clipping a bend of the river first.
     const toBridge = dist(p, centre) - CROSSING_RADIUS - 10;
     const nearBridge = { x: p.x + ((centre.x - p.x) / dist(p, centre)) * toBridge, y: p.y + ((centre.y - p.y) / dist(p, centre)) * toBridge };
@@ -129,11 +125,20 @@ export function generateMap(seed: number) {
     ...extras.map((p, i) => ({ name: label(extraKinds[i]), kind: extraKinds[i], ...p })),
   ];
   const east = west.map((o) => ({ ...o, ...mirror(o), name: label(o.kind), home: o.home === 0 ? (1 as const) : undefined }));
-  replace(OBJECTIVES, [
-    ...west,
-    { name: centreName, kind: mapKind === 'river' ? 'bridge' as const : 'village' as const, ...centre, centre: true },
-    ...east.reverse(),
-  ].map((o, id) => ({ ...o, id })));
+  // The outer crossing on each half is worth holding too, so the fighting spreads along the river.
+  const sideBridge = crossingsNorth[0];
+  if (sideBridge) {
+    const southCrossing = CROSSINGS[CROSSINGS.length - crossingsNorth.length];
+    const north = { name: sideBridge.name, kind: 'bridge' as const, x: sideBridge.x, y: sideBridge.y };
+    const south = { name: southCrossing.name, kind: 'bridge' as const, x: southCrossing.x, y: southCrossing.y };
+    replace(OBJECTIVES, [...west, north, { name: centreName, kind: 'bridge' as const, ...centre, centre: true }, south, ...east.reverse()].map((o, id) => ({ ...o, id })));
+  } else {
+    replace(OBJECTIVES, [
+      ...west,
+      { name: centreName, kind: mapKind === 'river' ? 'bridge' as const : 'village' as const, ...centre, centre: true },
+      ...east.reverse(),
+    ].map((o, id) => ({ ...o, id })));
+  }
 
   // Roads join the objectives through the centre and run back to both map edges, with side roads
   // over the other crossings (or straight across on open maps).
@@ -433,8 +438,9 @@ function acrossRiver(p: Vec): Vec {
 /**
  * Waypoints from a to b. If the river is in the way, the shortest route over a crossing, walking round
  * any bends on the way: a small graph of the crossings (a landing on each bank) and points along both banks.
+ * crossingCost adds a detour cost to a crossing (crowded, or held by the enemy) in metres.
  */
-export function planRoute(a: Vec, b: Vec): Vec[] {
+export function planRoute(a: Vec, b: Vec, crossingCost?: (c: Crossing) => number): Vec[] {
   if (nearCrossing(a) || !crossesRiver(a, b)) return [b];
   const nodes: Vec[] = [a, b];
   const links: [number, number, number][] = []; // free hops over a crossing, with their extra cost
@@ -442,7 +448,7 @@ export function planRoute(a: Vec, b: Vec): Vec[] {
     const n = acrossRiver(c);
     const off = CROSSING_RADIUS - 15;
     nodes.push({ x: c.x + n.x * off, y: c.y + n.y * off }, { x: c.x - n.x * off, y: c.y - n.y * off });
-    links.push([nodes.length - 2, nodes.length - 1, c.ford ? 150 : 0]);
+    links.push([nodes.length - 2, nodes.length - 1, (c.ford ? 150 : 0) + (crossingCost?.(c) ?? 0)]);
   }
   for (let i = 1; i < RIVER.length - 1; i++) {
     const n = acrossRiver(RIVER[i]);

@@ -189,6 +189,12 @@ export const RULES = {
   captureRadius: 160,
   garrisonThreat: 1500, // the AI leaves a town it holds empty unless enemies are this close
   borderWidth: 40, // impassable strip around the map edge
+  crossingCrowd: 160, // regiments this close to a bridge or ford count as on it
+  crossingSlow: 0.35, // each other regiment on a crossing slows the crossing by this much
+  crossingMinPace: 0.35, // but never below this share of normal speed
+  crossingCrowdCost: 120, // routes treat each friendly regiment on a crossing as this many metres of detour
+  crossingHeldRange: 350, // and each enemy regiment seen this close to it
+  crossingHeldCost: 500, // as this many
   edgeDisperseTime: 60, // routing units pinned at the border this long disperse
   edgeRallyBoost: 2, // routed units that reach the border get their nerve back this many times faster
   townDeployRadius: 450, // starting regiments can be repositioned this close to their home towns
