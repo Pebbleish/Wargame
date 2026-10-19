@@ -1,5 +1,5 @@
 import { MAP, RULES, UNIT_TYPES, UnitTypeId } from './config';
-import { CROSSINGS, EARTHWORKS, OBJECTIVES, RIVER, Terrain, Vec, clampToMap, crossesRiver, dist, riverSide, terrainAt } from './map';
+import { CROSSINGS, EARTHWORKS, OBJECTIVES, RIVER, Terrain, Vec, clampToMap, crossesRiver, dist, nearestRiverPoint, riverSide, terrainAt } from './map';
 import { Habits } from './habits';
 import { Command, Side, Unit, World, angleDiff, formationOf, isSupport } from './world';
 
@@ -74,7 +74,8 @@ export const DOCTRINES: Doctrine[] = [
 /**
  * The AI's tunable numbers. Tests and self-play tuning can hand an AI its own copy; the game uses these.
  * The values were tuned by self-play: mutants played the champion over thousands of battles, and changes were
- * kept only when they won at least 54% of 120 confirming battles.
+ * kept only when they won at least 54% of 120 confirming battles. Re-tuned after the rally, comeback, river and
+ * garrison changes (three changes kept out of twenty rounds).
  */
 export const PARAMS = {
   ground: 0, // weight on cover and high ground when garrisons pick where to stand (0 ignores the ground)
@@ -87,24 +88,24 @@ export const PARAMS = {
   restedAt: 75, // and come back above this
   stickTo: 200, // pull (in metres) of the objective a regiment was already sent to
   needPull: 150, // pull for each regiment an objective still needs
-  hqBack: 450, // how far behind the line the general rides
-  wagonsBack: 411, // and the wagons
+  hqBack: 313, // how far behind the line the general rides
+  wagonsBack: 348, // and the wagons
   shyOf: 700, // the general and wagons fall back when enemy troops come this close
-  raidReach: 1400, // how far raiding cavalry goes after guns, wagons and the general
+  raidReach: 860, // how far raiding cavalry goes after guns, wagons and the general
   cavReach: 673, // how far other cavalry does
   cavMorale: 50, // cavalry only charges above this morale
   cavFatigue: 105, // and below this fatigue (over 100: tiredness never stops a charge)
-  cavWait: 450, // how far off the flank of an attack cavalry waits
+  cavWait: 589, // how far off the flank of an attack cavalry waits
   pressRange: 600, // spare regiments attack enemies this close
-  pressMorale: 70, // when above this morale
+  pressMorale: 67, // when above this morale
   pressOdds: 2, // and this many more regiments than the enemy nearby
   pounceRange: 380, // line regiments charge a weaker enemy this close
   pounceGap: 15, // when this much steadier than it
-  fortifyScale: 0.83, // multiplies how close the enemy must come before garrisons dig in
+  fortifyScale: 0.48, // multiplies how close the enemy must come before garrisons dig in
   gunPrep: 4, // how much guns favour the defenders of an objective under attack
   gunAttacking: 3, // and enemies fighting our regiments
-  gunSafe: 500, // guns do not move up to within this of the enemy
-  attackRatio: 1.15, // attack when this much stronger than the enemy as far as it can see
+  gunSafe: 401, // guns do not move up to within this of the enemy
+  attackRatio: 1.78, // attack when this much stronger than the enemy as far as it can see
   defendRatio: 0.7, // stand on the defensive when weaker than this
   moraleLead: 15, // or attack when this far ahead on army morale
   takeOdds: 0.9, // only attack an objective whose defenders are at most this share of our strike force
@@ -118,8 +119,18 @@ export const PARAMS = {
   helpRange: 1500, // how far idle regiments go to help one under attack
   helpers: 2, // how many go
   homeReach: 1100, // a home town we hold keeps a garrison only while an enemy is within this (other towns: garrisonThreat)
-  postSafe: 900, // a lone garrison may leave to help when no enemy is within this of its post
+  postSafe: 919, // a lone garrison may leave to help when no enemy is within this of its post
   rescue: 1, // regiments go to the help of routing friends being ridden down by cavalry (0 never)
+  comeback: 1, // when behind on army morale, attacks objectives the enemy holds to win morale back (0 never)
+  comebackGap: 8, // how far behind counts
+  comebackWorth: 1.6, // how much more an enemy-held objective is worth then
+  horseAlert: 0, // an empty home town gets a garrison back when enemy cavalry comes this close (0: no special case; 1800 lost 46%)
+  groupPress: 0, // spare regiments only pounce together, two or more on the same enemy at once (0: one at a time; 1 lost 47%)
+  pontoon: 0, // on river maps, engineers bridge the river away from the crossings once a battle (0 never; 1 lost 46%)
+  pontoonGap: 250, // at least this far from any other crossing
+  openGuns: 2, // batteries in the opening army, counting the one it starts with (3 lost 42% in tests)
+  gunEvery: 1, // scales how often reinforcements are batteries (each plan sets its own rate)
+  lightEvery: 1, // and light infantry
   rally: 1, // the general rides out to rally broken regiments when it can do so safely (0 never does)
   rallyReach: 1500, // how far the general goes to reach them
   pursue: 1, // cavalry rides down routing regiments before they can rally (0 treats them like any other prey)
@@ -232,6 +243,8 @@ export class AI {
   private lookAt = 60;
   private verdict: { target: number | null; at: number } | null = null; // what the last look-ahead decided
   private fixed: number | null | undefined = undefined;
+  private bridgeAt = new Map<number, Vec>(); // engineers on their way to bridge the river, and where
+  private bridged = false; // this army has thrown its own bridge over the river
   private flankFor: number | null = null; // the attack the flank crossing below was chosen for
   private flank: Vec | null = null; // where that attack forms up beyond a quieter crossing, if anywhere // in a look-ahead copy: the attack it must make (null: none)
 
@@ -312,7 +325,11 @@ export class AI {
 
   private deploy(world: World): Command[] {
     if (world.sides[this.side].ready) return [];
-    const buys = this.doctrine.deploy.map((t, i): [UnitTypeId, number] => [t, [1200, 1800, 1500][i]]);
+    // At most openGuns batteries in the whole opening army (it starts with one): the cap on batteries means a
+    // gun-heavy plan gets its guns from reinforcements anyway, so the opening buys infantry instead.
+    let guns = 1;
+    const deploy = this.doctrine.deploy.map((t): UnitTypeId => (t === 'artillery' && ++guns > this.params.openGuns ? 'line' : t));
+    const buys = deploy.map((t, i): [UnitTypeId, number] => [t, [1200, 1800, 1500][i]]);
     const cmds: Command[] = buys.map(([type, y]) => ({
       kind: 'callIn', side: this.side, type, x: this.homeX(RULES.zoneStart + (type === 'artillery' ? 250 : 450)), y: this.side === 0 ? y : MAP.height - y,
     }));
@@ -330,7 +347,9 @@ export class AI {
         // A town we hold is only garrisoned while the enemy is within striking distance of it (further for home
         // towns, since losing everything loses the battle).
         const reach = o.home === this.side ? this.params.homeReach : RULES.garrisonThreat;
-        const threat = world.units.some((u) => u.side !== this.side && u.seen[this.side] && u.state !== 'routing' && dist(u, o) < reach);
+        // Horse covers ground fast, so enemy cavalry heading for an empty home town is a threat from further off.
+        const threat = world.units.some((u) => u.side !== this.side && u.seen[this.side] && u.state !== 'routing'
+          && (dist(u, o) < reach || (o.home === this.side && u.type === 'cavalry' && dist(u, o) < this.params.horseAlert)));
         need = threat ? 1 : 0;
       }
       need += Math.min(2, enemyNear);
@@ -373,7 +392,7 @@ export class AI {
     const reserve = this.pickReserve(infantry);
     this.assault.clear();
     // Engineers dig in at the held objective nearest the front that the enemy is not already at.
-    for (const u of mine.filter((m) => m.type === 'engineers')) assigned.set(u.id, this.worksSite(world, u, visibleEnemies));
+    for (const u of mine.filter((m) => m.type === 'engineers')) assigned.set(u.id, this.pontoonSite(world, u, visibleEnemies) ?? this.worksSite(world, u, visibleEnemies));
     for (const u of infantry.sort((a, b) => a.id - b.id)) {
       if (this.recovering.has(u.id) || u.id === reserve) continue;
       let best = -1;
@@ -404,6 +423,18 @@ export class AI {
     const assaultOrders = this.plan.target !== null ? this.assaultOrders(world, cmds, mine, visibleEnemies) : new Set<number>();
 
     const helpers = this.assignHelpers(world, mine, visibleEnemies, assigned, spare);
+    // Spare regiments that could press home, by the enemy each would go for: with group pressing, an enemy is only
+    // attacked once two or more can go in together (or some are already at it).
+    const pressing = new Map<number, number>();
+    for (const u of mine) {
+      if (u.type !== 'line' && u.type !== 'light') continue;
+      if (u.order.kind === 'attack') { pressing.set(u.order.target, (pressing.get(u.order.target) ?? 0) + 1); continue; }
+      if (!spare.has(u.id) || helpers.has(u.id) || this.recovering.has(u.id) || u.morale <= P.pressMorale) continue;
+      const e = this.nearest(u, visibleEnemies);
+      if (!e || dist(u, e) >= P.pressRange || e.state === 'routing' || formationOf(e) === 'fortified') continue;
+      pressing.set(e.id, (pressing.get(e.id) ?? 0) + 1);
+    }
+    const together = (e: Unit) => P.groupPress <= 0 || (pressing.get(e.id) ?? 0) >= 2;
     const footNear = (p: Vec, r: number) => visibleEnemies.some((e) => e.state !== 'routing' && !isSupport(e) && e.type !== 'artillery' && dist(e, p) < r);
 
     for (const u of mine) {
@@ -521,7 +552,7 @@ export class AI {
       // Spare regiments press home on enemies near the hot objective.
       const odds = nearest ? mine.filter((m) => !isSupport(m) && dist(m, nearest) < 500).length
         - visibleEnemies.filter((e) => e.state !== 'routing' && dist(e, nearest) < 500).length : 0;
-      if (spare.has(u.id) && nearest && nd < P.pressRange && nearest.state !== 'routing' && formationOf(nearest) !== 'fortified' && u.morale > P.pressMorale && odds >= P.pressOdds) {
+      if (spare.has(u.id) && nearest && nd < P.pressRange && nearest.state !== 'routing' && formationOf(nearest) !== 'fortified' && u.morale > P.pressMorale && odds >= P.pressOdds && together(nearest)) {
         if (u.formation !== 'formation') cmds.push({ kind: 'formation', side: this.side, ids: [u.id], formation: 'formation' });
         if (u.order.kind !== 'attack') cmds.push({ kind: 'attack', side: this.side, ids: [u.id], target: nearest.id });
         continue;
@@ -535,6 +566,12 @@ export class AI {
       // Engineers throw up earthworks at their objective while it is quiet.
       if (u.type === 'engineers') {
         if (u.building > 0) continue;
+        if (this.bridgeAt.get(u.id) === goal) {
+          // At the river bank: bridge it once there; until then, march straight to the spot.
+          if (dist(u, goal) < 50 && !u.moving && !world.buildBlocker(u)) cmds.push({ kind: 'build', side: this.side, ids: [u.id] });
+          else this.moveIfFar(cmds, u, goal, 30);
+          continue;
+        }
         if (dist(u, goal) < 300 && nd > 400 && !u.moving && !world.buildBlocker(u)) {
           cmds.push({ kind: 'build', side: this.side, ids: [u.id] });
           continue;
@@ -700,6 +737,44 @@ export class AI {
     return Math.min(1, n / 3);
   }
 
+  /**
+   * On river maps, once a battle, a spot on our bank for engineers to bridge the river: well away from every other
+   * crossing and from the enemy, and as close as possible to an objective over the river that we do not hold,
+   * so the army gets a way across that the enemy is not watching. Null once bridged, or when there is no such spot.
+   */
+  private pontoonSite(world: World, u: Unit, enemies: Unit[]): Vec | null {
+    if (this.params.pontoon <= 0 || !RIVER.length || world.time < 60) return null;
+    if (!this.bridged && CROSSINGS.some((c) => c.pontoon && dist(c, this.bridgeAt.get(u.id) ?? { x: -1e9, y: -1e9 }) < 250)) this.bridged = true;
+    if (this.bridged) { this.bridgeAt.delete(u.id); return null; }
+    const kept = this.bridgeAt.get(u.id);
+    if (kept && !enemies.some((e) => e.state !== 'routing' && !isSupport(e) && dist(e, kept) < 600)) return kept;
+    const ourBank = riverSide({ x: this.homeX(300), y: MAP.height / 2 });
+    const targets = OBJECTIVES.filter((o, i) => world.owners[i] !== this.side && riverSide(o) !== ourBank && o.kind !== 'bridge');
+    if (!targets.length) return null;
+    let best: Vec | null = null;
+    let bestScore = Infinity;
+    for (let i = 0; i < RIVER.length - 1; i++) {
+      const a = RIVER[i];
+      const b = RIVER[i + 1];
+      const len = dist(a, b);
+      const n = { x: -(b.y - a.y) / (len || 1), y: (b.x - a.x) / (len || 1) };
+      for (let t = 0; t < len; t += 60) {
+        const q = { x: a.x + ((b.x - a.x) * t) / len, y: a.y + ((b.y - a.y) * t) / len };
+        if (CROSSINGS.some((c) => dist(c, q) < this.params.pontoonGap)) continue;
+        let p = { x: q.x + n.x * 90, y: q.y + n.y * 90 };
+        if (riverSide(p) !== ourBank) p = { x: q.x - n.x * 90, y: q.y - n.y * 90 };
+        if (riverSide(p) !== ourBank || (nearestRiverPoint(p)?.d ?? 0) > 130) continue;
+        if (p.y < 300 || p.y > MAP.height - 300) continue;
+        if (enemies.some((e) => e.state !== 'routing' && !isSupport(e) && dist(e, p) < 700)) continue;
+        const score = Math.min(...targets.map((o) => dist(o, q))) + dist(u, p) * 0.3;
+        if (score < bestScore) { bestScore = score; best = p; }
+      }
+    }
+    if (best) this.bridgeAt.set(u.id, best);
+    else this.bridgeAt.delete(u.id);
+    return best;
+  }
+
   /** Where engineers should build: a held objective with no enemy close, nearest the hot spot. */
   private worksSite(world: World, u: Unit, enemies: Unit[]): Vec {
     const hot = this.hotObjective(world, enemies);
@@ -852,9 +927,11 @@ export class AI {
     const prefs: UnitTypeId[] = [];
     if (count('supply') === 0) prefs.push('supply');
     const d = this.doctrine;
-    if (this.calls % d.artilleryEvery === d.artilleryEvery - 1) prefs.push('artillery');
+    const gunEvery = Math.max(1, Math.round(d.artilleryEvery * this.params.gunEvery));
+    const lightEvery = Math.max(2, Math.round(d.lightEvery * this.params.lightEvery));
+    if (this.calls % gunEvery === gunEvery - 1) prefs.push('artillery');
     if (count('cavalry') < d.cavalry) prefs.push('cavalry');
-    if (this.calls % d.lightEvery === 1) prefs.push('light');
+    if (this.calls % lightEvery === 1) prefs.push('light');
     prefs.push('line');
     // Take the first type that can be called in; a capped or cooling type should not hold up the rest.
     const wanted = prefs.find((t) => !world.callInBlocker(this.side, t));
@@ -956,6 +1033,7 @@ export class AI {
     const strike = mine.filter((u) => u.type === 'line' || u.type === 'light' || u.type === 'cavalry').reduce((a, u) => a + this.value(u), 0);
     // Holding nothing at all is close to losing outright, so any objective will do.
     const desperate = heldByUs === 0 && heldByThem > 0;
+    const behind = P.comeback > 0 && me.armyMorale < them.armyMorale - P.comebackGap && heldByThem > 0 && RULES.recaptureMorale > 0;
     const limit = desperate ? 2 : P.takeOdds;
     let best: number | null = null;
     let bestScore = -Infinity;
@@ -965,7 +1043,9 @@ export class AI {
       const defence = this.enemyPowerNear(o, 600);
       if (defence > strike * limit) return;
       // Our own home towns come first, then whatever the enemy holds, the centre, and depots (income).
-      const worth = (o.centre ? 1.5 : o.kind === 'depot' ? 1.2 : 1) * (world.owners[i] === 1 - this.side ? 1.3 : 1) * (o.home === this.side ? 2 : 1);
+      const worth = (o.centre ? 1.5 : o.kind === 'depot' ? 1.2 : 1) * (world.owners[i] === 1 - this.side ? 1.3 : 1) * (o.home === this.side ? 2 : 1)
+        // Behind on morale, taking places back from the enemy is how to win it back.
+        * (behind && world.owners[i] === 1 - this.side ? P.comebackWorth : 1);
       // A one-wing plan prefers objectives on its chosen flank.
       const onWing = this.doctrine.wing && (o.y - MAP.height / 2) * this.dir() * this.wingSign > 200 ? 1.5 : 1;
       const score = (worth * onWing * 1000) / (defence + 300) - dist(anchor, o) * 0.4 + (i === p.target ? 0.6 : 0);
@@ -976,7 +1056,7 @@ export class AI {
     // In test battles, holding objectives and letting the enemy come beat attacking whenever ahead, so a set-piece
     // attack is only launched when the army must: late in the battle and behind, or holding no objective at all.
     // The rest of the time, spare regiments still pounce wherever they have the numbers.
-    const willing = this.doctrine.attack === 'stronger' && p.posture === 'attack';
+    const willing = (this.doctrine.attack === 'stronger' && p.posture === 'attack') || (behind && ratio > 0.8);
     if (this.fixed !== undefined) {
       // A look-ahead copy makes the attack it was given, or none.
       best = this.fixed !== null && world.owners[this.fixed] !== this.side ? this.fixed : null;
