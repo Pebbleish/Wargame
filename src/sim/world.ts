@@ -82,9 +82,10 @@ export interface Smarts {
   fallBack: boolean; // a wavering regiment with no orders steps back out of musket range to recover
   shells: boolean; // marching troops go round ground the enemy guns are shelling
   ammo: boolean; // a regiment out of ammunition with nothing to do walks to the supply wagons
+  focus: boolean; // with smart targeting, prefer the enemy other regiments are already shooting (the AI turns it on)
 }
 
-export const ALL_SMARTS: Smarts = { target: true, brace: true, bait: true, fallBack: true, shells: true, ammo: true };
+export const ALL_SMARTS: Smarts = { target: true, brace: true, bait: true, fallBack: true, shells: true, ammo: true, focus: false };
 
 export interface Impact {
   x: number;
@@ -273,6 +274,16 @@ export class World {
     this.rng = new Rng(seed);
     this.sides = [newSide(nations[0]), newSide(nations[1])];
     for (const side of [0, 1] as Side[]) this.placeCore(side);
+  }
+
+  /** An independent copy of the battle that can be played forward (the AI's look-ahead). The log is left behind. */
+  clone(): World {
+    const { rng, events, ...rest } = this as unknown as { rng: Rng; events: GameEvent[] };
+    const c = Object.assign(Object.create(World.prototype), structuredClone(rest)) as World;
+    c.rng = rng.copy();
+    c.events = [];
+    void events;
+    return c;
   }
 
   // ---------- setup ----------
@@ -665,6 +676,7 @@ export class World {
     this.updateSupply();
     this.economy();
     this.arrivals();
+    this.countAims();
     for (const u of this.units) this.updateUnit(u);
     this.resolveMelee();
     this.separate();
@@ -683,6 +695,18 @@ export class World {
       const sp = this.baseSpeed(u);
       const cur = this.groupSpeed.get(u.group);
       if (cur === undefined || sp < cur) this.groupSpeed.set(u.group, sp);
+    }
+  }
+
+  /** How many regiments of each side are shooting at each enemy, for focused fire. */
+  private aims = new Map<number, number>();
+  private countAims() {
+    this.aims.clear();
+    for (const u of this.units) {
+      if (u.shotAt === null || u.state === 'routing' || !this.smarts[u.side].focus) continue;
+      const e = this.unit(u.shotAt);
+      if (!e || dist(u, e) > UNIT_TYPES[u.type].range * 1.2) continue;
+      this.aims.set(e.id, (this.aims.get(e.id) ?? 0) + 1);
     }
   }
 
@@ -1249,6 +1273,8 @@ export class World {
         score -= 0.6 * (1 - Math.max(0, e.morale) / 100) + (e.state === 'wavering' ? 0.25 : 0) + (e.id === u.shotAt ? 0.15 : 0);
         if (Math.abs(angleDiff(u.facing, Math.atan2(e.y - u.y, e.x - u.x))) > arc) score += 0.5;
         if (e.state === 'routing') score += 0.5;
+        // Focused fire: pile onto an enemy others are already shooting, to break it rather than spread the losses.
+        if (this.smarts[u.side].focus) score -= 0.12 * Math.min(3, (this.aims.get(e.id) ?? 0) - (u.shotAt === e.id ? 1 : 0));
       }
       if (score >= bestScore) continue;
       best = e;

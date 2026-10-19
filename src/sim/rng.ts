@@ -14,6 +14,13 @@ export class Rng {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   }
 
+  /** A copy that carries on with the same sequence. */
+  copy(): Rng {
+    const r = new Rng(0);
+    r.state = this.state;
+    return r;
+  }
+
   range(min: number, max: number): number {
     return min + (max - min) * this.next();
   }
