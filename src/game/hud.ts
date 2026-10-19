@@ -150,25 +150,36 @@ export class Hud {
       }
     });
 
+    const k = (key: string) => `<kbd>${key}</kbd>`;
     this.help.innerHTML = `
       <h3>How to play</h3>
-      <p>Break the enemy army's morale, hold every objective for ${RULES.dominationHold}s, or lead on points when the ${RULES.matchLength / 60}-minute clock runs out.</p>
-      <p><kbd>Left-click</kbd> select · <kbd>drag</kbd> move the map · <kbd>Shift</kbd>+drag box select (<kbd>Ctrl</kbd>+<kbd>Shift</kbd> to add) · <kbd>Shift</kbd>+click add<br>
-      <kbd>Right-click</kbd> move, or attack an enemy (the word by the pointer says what will happen) · hold the button to preview the route<br>
-      <kbd>Right-drag</kbd> form a line along the drag<br>
-      <kbd>F</kbd> cycle formation, or <kbd>1</kbd> march · <kbd>2</kbd> formation · <kbd>3</kbd> fortify · <kbd>H</kbd> hold<br>
-      Artillery: <kbd>B</kbd> then click to place its fire circle (or right-click an enemy) · <kbd>X</kbd> cease fire<br>
-      <kbd>Space</kbd> pause · <kbd>+</kbd>/<kbd>−</kbd> speed<br>
-      <kbd>WASD</kbd> or arrows pan · wheel zoom</p>
-      <p>Selected regiments show what they can shoot: a shaded arc for line infantry (it fires to its front), a ring for skirmishers and guns. Words under your regiments flag trouble (Flanked!, Wavering, Out of ammo). Alerts in the bottom-right corner take you there when clicked. The top bar shows what is costing each army its morale.</p>
-      <p><b>Marching</b> is fastest but fights badly; troops march automatically on any move out of combat and form up when they arrive. <b>Formation</b> is the fighting stance. <b>Fortified</b> barely moves but takes less damage and loses morale more slowly. Digging in takes ${RULES.fortifyTime}s and is only possible out of combat; moving gives it up. Shells hit fortified troops harder.</p>
-      <p>Your <b>general</b> (the block with the banner) leads from the field: regiments inside the ring around the general lose morale a third more slowly and keep recovering even under fire. Losing the general costs ${RULES.generalLossMorale} army morale. Routed troops run to the general if it is closer and safe, and rally on their own once clear of the enemy, much sooner near the general. A regiment that breaks a second time only rallies to the general, so ride over to troops stuck at the map edge before they desert. <kbd>Double-click</kbd> a regiment to select its whole brigade.</p>
-      <p>Marching, charging and melee tire troops; resting restores them. Firing uses <b>ammunition</b>: below ${RULES.lowAmmo}% fire is halved, and at 0 they stop firing. <b>Supply wagons</b> (each army starts with two) send carts to troops within ${RULES.supplyRange}m; every regiment inside the wagons' green ring that needs it gets carts of its own, neediest first, and refills and recovers while the load lasts (green halo). Wagons only send carts while standing still. Carts can be shot up on the road. Depots you hold and your deployment zone also refill slowly. Regiments gain experience in battle (gold pips: veteran, elite); reinforcements arrive green.</p>
-      <p>Engineers (<kbd>E</kbd>) build earthworks that give cover like a village, or a pontoon bridge when standing at a river (up to ${RULES.maxWorks} per side). Troops near engineers dig in twice as fast.</p>
-      <p><b>Regiments think for themselves</b> between orders: they shoot the shakiest enemy in front of them, halt and face cavalry charging at them, go round ground the enemy guns are shelling, will not leave position to chase an enemy that is dug in, in cover or stronger, step back out of musket range to recover when wavering with no orders (not when holding an objective), and walk back to the wagons when out of ammunition. <kbd>H</kbd> hold keeps them where they are.</p>
-      <p>Artillery stops and sets up when you give it a target, and only fires once set up. Units in woods are hidden unless your troops are within ${RULES.woodsSpotRange}m; firing guns give themselves away.</p>
-      <p>Call in troops from the bar on the left, then click inside your deployment zone (the shaded strip near the bottom). They march in from your map edge.</p>
-      <p><button data-a="close">Got it</button></p>`;
+      <p class="goal">Break the enemy's morale, hold all ${OBJECTIVES.length} objectives for ${RULES.dominationHold}s, or lead on points after ${RULES.matchLength / 60} min.</p>
+      <table class="keys">
+        <tr><td>${k('Click')}, ${k('Shift')}+drag</td><td>Select, box select</td></tr>
+        <tr><td>${k('Double-click')}</td><td>Select the whole brigade</td></tr>
+        <tr><td>${k('Right-click')}</td><td>Move, or attack an enemy</td></tr>
+        <tr><td>${k('Right-drag')}</td><td>Form a line along the drag</td></tr>
+        <tr><td>${k('1')} ${k('2')} ${k('3')} ${k('H')}</td><td>March, formation, fortify, hold</td></tr>
+        <tr><td>${k('B')} ${k('X')}</td><td>Guns: aim, cease fire</td></tr>
+        <tr><td>Drag, ${k('WASD')}</td><td>Move the map; wheel zooms</td></tr>
+        <tr><td>${k('Space')} ${k('+')} ${k('−')}</td><td>Pause, speed</td></tr>
+      </table>
+      <ul class="tips">
+        <li>Keep regiments in the <b>general's ring</b>, and send the general to <b>routed troops</b> to rally them.</li>
+        <li><b>Fortify</b> to hold ground; <b>shell</b> enemies who have dug in.</li>
+        <li>Keep <b>supply wagons</b> near the fighting so muskets don't run dry.</li>
+      </ul>
+      <details><summary>Formations</summary>
+        <p><b>March</b> is fastest but fights badly (used automatically out of combat). <b>Formation</b> is the fighting stance. <b>Fortified</b> barely moves but takes less damage and morale loss; it takes ${RULES.fortifyTime}s, only out of combat. Shells hit fortified troops harder.</p></details>
+      <details><summary>Morale and the general</summary>
+        <p>Inside the general's ring, morale loss is cut by a third and keeps recovering even under fire. Routed troops run to the general if it is safe, and rally once clear of the enemy, much sooner near the general. Troops that break twice rally only to the general. Losing the general costs ${RULES.generalLossMorale} army morale. The top bar shows what is draining each army.</p></details>
+      <details><summary>Supply, fatigue and reinforcements</summary>
+        <p>Below ${RULES.lowAmmo}% ammunition fire is halved; at 0 it stops. Standing wagons send carts to regiments within ${RULES.supplyRange}m (green ring), which can be shot up on the way. Held depots and your deployment zone refill slowly. Marching, charging and melee tire troops; rest restores them. Call in troops from the bar on the left, then click in your deployment zone; they arrive green and gain experience in battle (gold pips).</p></details>
+      <details><summary>Guns, engineers and terrain</summary>
+        <p>Guns set up before firing. Engineers (${k('E')}) build earthworks or a pontoon bridge at a river (${RULES.maxWorks} per side), and nearby troops dig in twice as fast. Woods hide units beyond ${RULES.woodsSpotRange}m; firing guns give themselves away.</p></details>
+      <details><summary>What regiments do on their own</summary>
+        <p>Between orders they shoot the shakiest enemy in front, face charging cavalry, avoid ground being shelled, won't chase a stronger or dug-in enemy, step back when wavering, and walk to the wagons when out of ammunition. ${k('H')} keeps them in place.</p></details>
+      <p style="margin-top:8px"><button data-a="close">Got it</button></p>`;
     this.help.addEventListener('click', (e) => {
       if ((e.target as HTMLElement).dataset.a === 'close') this.help.style.display = 'none';
     });
