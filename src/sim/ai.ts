@@ -25,6 +25,52 @@ interface Sighting {
 }
 
 /**
+ * A battle plan. Each battle the AI picks one, so it does not fight the same way every time: what it opens with,
+ * what it buys, when it attacks and where, how early it digs in, and what its cavalry is for.
+ */
+export interface Doctrine {
+  name: string;
+  report: string; // what the other side's scouts make of it, a minute into the battle
+  deploy: UnitTypeId[]; // the three regiments bought before the battle
+  cavalry: number; // cavalry regiments to keep in the field
+  artilleryEvery: number; // every Nth reinforcement is a battery
+  lightEvery: number; // every Nth reinforcement is light infantry
+  attack: 'late' | 'stronger'; // set-piece attacks only when it must, or whenever it is the stronger army
+  wing: boolean; // concentrates spare regiments, attacks and cavalry on one flank
+  fortifyAt: number; // garrisons dig in when the enemy comes this close
+  reserve: boolean; // keeps a regiment back to counter-attack
+  raid: boolean; // cavalry ranges deep after guns, wagons and the general
+}
+
+export const DOCTRINES: Doctrine[] = [
+  {
+    name: 'Fortress', report: 'Scouts report the enemy digging in around its towns, with guns behind.',
+    deploy: ['line', 'artillery', 'artillery'], cavalry: 2, artilleryEvery: 4, lightEvery: 5,
+    attack: 'late', wing: false, fortifyAt: 1200, reserve: true, raid: false,
+  },
+  {
+    name: 'Hammer', report: 'Scouts report enemy infantry massing for an attack.',
+    deploy: ['line', 'line', 'artillery'], cavalry: 2, artilleryEvery: 3, lightEvery: 6,
+    attack: 'stronger', wing: false, fortifyAt: 700, reserve: true, raid: false,
+  },
+  {
+    name: 'Envelopment', report: 'Scouts report enemy columns working round one of our flanks.',
+    deploy: ['light', 'line', 'artillery'], cavalry: 3, artilleryEvery: 5, lightEvery: 3,
+    attack: 'stronger', wing: true, fortifyAt: 900, reserve: false, raid: false,
+  },
+  {
+    name: 'Grand battery', report: 'Scouts report the enemy bringing up a great many guns.',
+    deploy: ['artillery', 'artillery', 'line'], cavalry: 1, artilleryEvery: 2, lightEvery: 4,
+    attack: 'late', wing: false, fortifyAt: 1200, reserve: true, raid: false,
+  },
+  {
+    name: 'Raiders', report: 'Scouts report strong bodies of enemy horse on the move.',
+    deploy: ['cavalry', 'line', 'artillery'], cavalry: 3, artilleryEvery: 4, lightEvery: 4,
+    attack: 'late', wing: true, fortifyAt: 1200, reserve: true, raid: true,
+  },
+];
+
+/**
  * A layered AI. A commander reviews the battle every few seconds and settles the army's posture and which
  * objective to attack. Regiments are then given roles (garrison, assault group, reserve, recovering), and
  * each role turns into orders through the same commands a human player uses. It only knows about enemies
@@ -43,7 +89,15 @@ export class AI {
   private reserveId: number | null = null;
   private assault = new Set<number>(); // regiments in the current attack
 
-  constructor(private side: Side) {}
+  readonly doctrine: Doctrine;
+  private wingSign: number; // which flank a one-wing plan favours: +1 or -1, from the army's own point of view
+
+  /** Battle plan from the battle's seed (or given), so a replay of the same seed fights the same way. */
+  constructor(readonly side: Side, seed = 1, doctrine?: Doctrine) {
+    const h = Math.imul(seed * 2654435761 + side * 40503, 2246822519) >>> 0;
+    this.doctrine = doctrine ?? DOCTRINES[(h >>> 8) % DOCTRINES.length];
+    this.wingSign = (h & 1) ? 1 : -1;
+  }
 
   update(world: World): Command[] {
     if (world.phase === 'deploy') return this.deploy(world);
@@ -58,8 +112,7 @@ export class AI {
 
   private deploy(world: World): Command[] {
     if (world.sides[this.side].ready) return [];
-    // Two batteries from the start: guns wear the enemy down without losses of their own.
-    const buys: [UnitTypeId, number][] = [['line', 1200], ['artillery', 1800], ['artillery', 1500]];
+    const buys = this.doctrine.deploy.map((t, i): [UnitTypeId, number] => [t, [1200, 1800, 1500][i]]);
     const cmds: Command[] = buys.map(([type, y]) => ({
       kind: 'callIn', side: this.side, type, x: this.homeX(RULES.zoneStart + (type === 'artillery' ? 250 : 450)), y: this.side === 0 ? y : MAP.height - y,
     }));
@@ -130,7 +183,7 @@ export class AI {
         continue;
       }
       if (best === -1) {
-        const side = this.slot(u.id) % 2 ? 1 : -1;
+        const side = this.doctrine.wing ? this.wingSign : this.slot(u.id) % 2 ? 1 : -1;
         assigned.set(u.id, clampToMap({ x: hot.x - this.dir() * 150, y: hot.y + this.dir() * side * 350 }, RULES.borderWidth + 100));
         spare.add(u.id);
         continue;
@@ -164,8 +217,14 @@ export class AI {
       }
 
       if (u.type === 'cavalry') {
+        // Raiders range much further after guns, wagons and the general.
+        // Deep raids only go for targets no formed infantry is guarding.
+        const reach = this.doctrine.raid ? 1400 : 800;
+        const guarded = (e: Unit) => visibleEnemies.some((g) => g !== e && (g.type === 'line' || g.type === 'light') && g.state !== 'routing' && dist(g, e) < 300);
         const prey = visibleEnemies
-          .filter((e) => dist(u, e) < 800 && formationOf(e) !== 'fortified' && (e.state !== 'ok' || e.type === 'artillery' || e.type === 'light' || e.type === 'supply' || (e.type === 'general' && dist(u, e) < 450)))
+          .filter((e) => dist(u, e) < reach && formationOf(e) !== 'fortified' && (e.state !== 'ok' || e.type === 'artillery' || e.type === 'light' || e.type === 'supply'
+            || (e.type === 'general' && dist(u, e) < (this.doctrine.raid ? 1200 : 450)))
+            && (dist(u, e) < 800 || !guarded(e)))
           .sort((a, b) => dist(u, a) - dist(u, b))[0];
         // Otherwise hit the flank or rear of an enemy already fighting our infantry.
         const target = prey ?? visibleEnemies
@@ -181,8 +240,12 @@ export class AI {
           const stage = this.stagingPoint(mine);
           const along = { x: t.x - stage.x, y: t.y - stage.y };
           const len = Math.hypot(along.x, along.y) || 1;
-          const side = this.slot(u.id) % 2 ? 1 : -1;
+          const side = this.doctrine.wing ? this.wingSign * this.dir() : this.slot(u.id) % 2 ? 1 : -1;
           this.moveIfFar(cmds, u, clampToMap({ x: stage.x - (along.y / len) * 450 * side, y: stage.y + (along.x / len) * 450 * side }, RULES.borderWidth + 80));
+        } else if (this.doctrine.raid || this.doctrine.wing) {
+          // Out on the chosen flank, just behind the line, looking for an opening.
+          const anchor = this.frontAnchor(mine);
+          this.moveIfFar(cmds, u, clampToMap({ x: anchor.x - this.dir() * 150, y: anchor.y + this.dir() * this.wingSign * 600 }, RULES.borderWidth + 80));
         } else {
           const anchor = this.frontAnchor(mine);
           this.moveIfFar(cmds, u, { x: anchor.x - this.dir() * 250, y: anchor.y + this.dir() * (this.slot(u.id) % 2 ? 300 : -300) });
@@ -257,7 +320,7 @@ export class AI {
       const atGoal = dist(u, goal) < 250;
       const cavThreat = visibleEnemies.some((e) => e.type === 'cavalry' && e.state === 'ok' && dist(e, u) < 300);
       // Troops already in a fight cannot start digging in, so only ask when the order will be accepted.
-      const wanted = atGoal && (nd < 1200 || cavThreat) && (u.formation === 'fortified' || world.canFortify(u)) ? 'fortified' : 'formation';
+      const wanted = atGoal && (nd < this.doctrine.fortifyAt || cavThreat) && (u.formation === 'fortified' || world.canFortify(u)) ? 'fortified' : 'formation';
       if (u.formation !== wanted) cmds.push({ kind: 'formation', side: this.side, ids: [u.id], formation: wanted });
       // Spread regiments around the objective, mirrored so both sides behave the same way.
       const n = this.slot(u.id);
@@ -387,9 +450,10 @@ export class AI {
     const count = (t: UnitTypeId) => world.units.filter((u) => u.side === this.side && u.type === t).length;
     const prefs: UnitTypeId[] = [];
     if (count('supply') === 0) prefs.push('supply');
-    if (this.calls % 4 === 3) prefs.push('artillery');
-    if (count('cavalry') < 2) prefs.push('cavalry');
-    if (this.calls % 5 === 1) prefs.push('light');
+    const d = this.doctrine;
+    if (this.calls % d.artilleryEvery === d.artilleryEvery - 1) prefs.push('artillery');
+    if (count('cavalry') < d.cavalry) prefs.push('cavalry');
+    if (this.calls % d.lightEvery === 1) prefs.push('light');
     prefs.push('line');
     // Take the first type that can be called in; a capped or cooling type should not hold up the rest.
     const wanted = prefs.find((t) => !world.callInBlocker(this.side, t));
@@ -481,13 +545,16 @@ export class AI {
       if (defence > strike * limit) return;
       // Our own home towns come first, then whatever the enemy holds, the centre, and depots (income).
       const worth = (o.centre ? 1.5 : o.kind === 'depot' ? 1.2 : 1) * (world.owners[i] === 1 - this.side ? 1.3 : 1) * (o.home === this.side ? 2 : 1);
-      const score = (worth * 1000) / (defence + 300) - dist(anchor, o) * 0.4 + (i === p.target ? 0.6 : 0);
+      // A one-wing plan prefers objectives on its chosen flank.
+      const onWing = this.doctrine.wing && (o.y - MAP.height / 2) * this.dir() * this.wingSign > 200 ? 1.5 : 1;
+      const score = (worth * onWing * 1000) / (defence + 300) - dist(anchor, o) * 0.4 + (i === p.target ? 0.6 : 0);
       if (score > bestScore) { bestScore = score; best = i; }
     });
     // In test battles, holding objectives and letting the enemy come beat attacking whenever ahead, so a set-piece
     // attack is only launched when the army must: late in the battle and behind, or holding no objective at all.
     // The rest of the time, spare regiments still pounce wherever they have the numbers.
-    if (!desperate && !(late && losing)) best = null;
+    const willing = this.doctrine.attack === 'stronger' && p.posture === 'attack';
+    if (!desperate && !(late && losing) && !willing) best = null;
     if (best !== p.target) {
       if (p.target !== null) this.endAttack(world, false);
       if (best !== null) {
@@ -596,7 +663,7 @@ export class AI {
   /** The freshest line regiment not tied down, kept back once the army has six or more infantry regiments. */
   private pickReserve(infantry: Unit[]): number | null {
     const line = infantry.filter((u) => u.type === 'line' && !this.recovering.has(u.id));
-    if (infantry.length < 6) { this.reserveId = null; return null; }
+    if (infantry.length < 6 || !this.doctrine.reserve) { this.reserveId = null; return null; }
     const current = line.find((u) => u.id === this.reserveId);
     if (current && (current.order.kind === 'attack' || current.morale > 60)) return current.id;
     const fresh = line.slice().sort((a, b) => this.value(b) - this.value(a) || a.id - b.id)[0];

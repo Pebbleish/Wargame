@@ -373,7 +373,7 @@ export class World {
     return this.units.filter((u) => u.side === side && u.type !== 'general').length + this.sides[side].queue.length;
   }
 
-  private log(side: Side | -1, text: string) {
+  log(side: Side | -1, text: string) {
     this.events.push({ t: this.time, side, text });
     if (this.events.length > 60) this.events.shift();
   }

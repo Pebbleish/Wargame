@@ -50,6 +50,7 @@ export class BattleScene extends Phaser.Scene {
   private keys: Record<string, boolean> = {};
   private pointerWorld: Vec = { x: 0, y: 0 };
   private overCanvas = true;
+  private scouted = false; // the scouts' report on the enemy's battle plan has come in
   private mapLayer: Phaser.GameObjects.GameObject[] = [];
   private aiming = false; // placing the fire circle for the selected batteries
 
@@ -107,7 +108,8 @@ export class BattleScene extends Phaser.Scene {
   private newBattle() {
     this.world = new World(this.seed);
     this.buildMap();
-    this.ais = this.spectating ? [new AI(0), new AI(1)] : [new AI(1)];
+    this.ais = this.spectating ? [new AI(0, this.seed), new AI(1, this.seed)] : [new AI(1, this.seed)];
+    this.scouted = false;
     this.selected.clear();
     this.pendingCallIn = null;
     this.aiming = false;
@@ -455,6 +457,11 @@ export class BattleScene extends Phaser.Scene {
       let guard = 0;
       while (this.acc >= STEP && guard++ < 60) {
         for (const ai of this.ais) for (const c of ai.update(this.world)) this.world.apply(c);
+        // A minute in, the scouts work out what kind of battle the enemy is fighting.
+        if (!this.scouted && this.world.phase === 'battle' && this.world.time > 60) {
+          this.scouted = true;
+          for (const ai of this.ais) this.world.log(ai.side === 0 ? 1 : 0, ai.doctrine.report);
+        }
         this.world.step();
         this.acc -= STEP;
       }
