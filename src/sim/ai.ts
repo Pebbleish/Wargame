@@ -73,6 +73,8 @@ export const DOCTRINES: Doctrine[] = [
 
 /**
  * The AI's tunable numbers. Tests and self-play tuning can hand an AI its own copy; the game uses these.
+ * The values were tuned by self-play: mutants played the champion over thousands of battles, and changes were
+ * kept only when they won at least 54% of 120 confirming battles.
  */
 export const PARAMS = {
   ground: 0, // weight on cover and high ground when garrisons pick where to stand (0 ignores the ground)
@@ -86,33 +88,33 @@ export const PARAMS = {
   stickTo: 200, // pull (in metres) of the objective a regiment was already sent to
   needPull: 150, // pull for each regiment an objective still needs
   hqBack: 450, // how far behind the line the general rides
-  wagonsBack: 550, // and the wagons
+  wagonsBack: 411, // and the wagons
   shyOf: 700, // the general and wagons fall back when enemy troops come this close
   raidReach: 1400, // how far raiding cavalry goes after guns, wagons and the general
-  cavReach: 800, // how far other cavalry does
+  cavReach: 673, // how far other cavalry does
   cavMorale: 50, // cavalry only charges above this morale
-  cavFatigue: 70, // and below this fatigue
+  cavFatigue: 105, // and below this fatigue (over 100: tiredness never stops a charge)
   cavWait: 450, // how far off the flank of an attack cavalry waits
   pressRange: 600, // spare regiments attack enemies this close
   pressMorale: 70, // when above this morale
   pressOdds: 2, // and this many more regiments than the enemy nearby
   pounceRange: 380, // line regiments charge a weaker enemy this close
-  pounceGap: 20, // when this much steadier than it
-  fortifyScale: 1, // multiplies how close the enemy must come before garrisons dig in
+  pounceGap: 15, // when this much steadier than it
+  fortifyScale: 0.83, // multiplies how close the enemy must come before garrisons dig in
   gunPrep: 4, // how much guns favour the defenders of an objective under attack
   gunAttacking: 3, // and enemies fighting our regiments
   gunSafe: 500, // guns do not move up to within this of the enemy
   attackRatio: 1.15, // attack when this much stronger than the enemy as far as it can see
   defendRatio: 0.7, // stand on the defensive when weaker than this
-  moraleLead: 20, // or attack when this far ahead on army morale
+  moraleLead: 15, // or attack when this far ahead on army morale
   takeOdds: 0.9, // only attack an objective whose defenders are at most this share of our strike force
   abortMorale: 40, // call off an attack when the attackers' morale falls below this
   abortOdds: 0.6, // or their strength below this share of the defenders'
   restAfter: 30, // seconds before a new attack after one fails
   bombardTime: 35, // seconds the guns prepare an attack (60 against dug-in defenders)
   chargeMorale: 45, // assault troops charge defenders below this morale
-  chargeOdds: 2, // or not dug in when they have this many regiments to each defender
-  reserveFrom: 6, // keep a reserve once there are this many infantry regiments
+  chargeOdds: 4, // or not dug in when they have this many regiments to each defender
+  reserveFrom: 7, // keep a reserve once there are this many infantry regiments
   helpRange: 1500, // how far idle regiments go to help one under attack
   helpers: 2, // how many go
 };
