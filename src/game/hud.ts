@@ -153,13 +153,13 @@ export class Hud {
     this.help.innerHTML = `
       <h3>How to play</h3>
       <p>Break the enemy army's morale, hold every objective for ${RULES.dominationHold}s, or lead on points when the ${RULES.matchLength / 60}-minute clock runs out.</p>
-      <p><kbd>Left-click</kbd> select · <kbd>drag</kbd> box select · <kbd>Shift</kbd>+click or <kbd>Shift</kbd>+drag add to the selection · <kbd>Ctrl</kbd>+<kbd>A</kbd> select all<br>
+      <p><kbd>Left-click</kbd> select · <kbd>drag</kbd> move the map · <kbd>Shift</kbd>+drag box select (<kbd>Ctrl</kbd>+<kbd>Shift</kbd> to add) · <kbd>Shift</kbd>+click add<br>
       <kbd>Right-click</kbd> move, or attack an enemy (the word by the pointer says what will happen) · hold the button to preview the route<br>
       <kbd>Right-drag</kbd> form a line along the drag<br>
       <kbd>F</kbd> cycle formation, or <kbd>1</kbd> march · <kbd>2</kbd> formation · <kbd>3</kbd> fortify · <kbd>H</kbd> hold<br>
       Artillery: <kbd>B</kbd> then click to place its fire circle (or right-click an enemy) · <kbd>X</kbd> cease fire<br>
       <kbd>Space</kbd> pause · <kbd>+</kbd>/<kbd>−</kbd> speed<br>
-      <kbd>WASD</kbd>, arrows, mouse at the screen edge, middle-drag or <kbd>Alt</kbd>+drag move the map · wheel zoom</p>
+      <kbd>WASD</kbd> or arrows pan · wheel zoom</p>
       <p>Selected regiments show what they can shoot: a shaded arc for line infantry (it fires to its front), a ring for skirmishers and guns. Words under your regiments flag trouble (Flanked!, Wavering, Out of ammo). Alerts in the bottom-right corner take you there when clicked. The top bar shows what is costing each army its morale.</p>
       <p><b>Marching</b> is fastest but fights badly; troops march automatically on any move out of combat and form up when they arrive. <b>Formation</b> is the fighting stance. <b>Fortified</b> barely moves but takes less damage and loses morale more slowly. Digging in takes ${RULES.fortifyTime}s and is only possible out of combat; moving gives it up. Shells hit fortified troops harder.</p>
       <p>Your <b>general</b> (the block with the banner) leads from the field: regiments inside the ring around the general lose morale more slowly and recover faster. Losing the general costs ${RULES.generalLossMorale} army morale. Routed troops rally on their own once safe, and much sooner near the general. <kbd>Double-click</kbd> a regiment to select its whole brigade.</p>

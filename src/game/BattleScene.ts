@@ -27,6 +27,7 @@ interface Drag {
   screen: Vec;
   current: Vec;
   moved: boolean;
+  panning: boolean; // a plain left-drag moves the map; Shift+drag box-selects
 }
 
 export class BattleScene extends Phaser.Scene {
@@ -209,12 +210,13 @@ export class BattleScene extends Phaser.Scene {
 
     this.input.on('pointerdown', (p: Phaser.Input.Pointer) => {
       const w = { x: p.worldX, y: p.worldY };
-      // The map moves with a middle-drag, or Alt+drag for trackpads; a plain left-drag draws a selection box.
-      if (p.button === 1 || (p.button === 0 && p.event.altKey)) {
+      if (p.button === 1) {
         this.pan = { x: cam.scrollX, y: cam.scrollY, sx: p.x, sy: p.y };
         return;
       }
-      this.drag = { button: p.button, start: w, screen: { x: p.x, y: p.y }, current: w, moved: false };
+      const panning = p.button === 0 && !p.event.shiftKey && !this.aiming && !this.pendingCallIn;
+      if (panning) this.pan = { x: cam.scrollX, y: cam.scrollY, sx: p.x, sy: p.y };
+      this.drag = { button: p.button, start: w, screen: { x: p.x, y: p.y }, current: w, moved: false, panning };
     });
 
     this.input.on('gameover', () => { this.overCanvas = true; });
@@ -223,7 +225,7 @@ export class BattleScene extends Phaser.Scene {
     this.input.on('pointermove', (p: Phaser.Input.Pointer) => {
       this.pointerSeen = true;
       this.pointerWorld = { x: p.worldX, y: p.worldY };
-      if (this.pan) {
+      if (this.pan && (!this.drag?.panning || Math.hypot(p.x - this.pan.sx, p.y - this.pan.sy) > 8)) {
         const d = screenToWorldDir((p.x - this.pan.sx) / cam.zoom, (p.y - this.pan.sy) / cam.zoom);
         cam.scrollX = this.pan.x - d.x;
         cam.scrollY = this.pan.y - d.y;
@@ -239,15 +241,16 @@ export class BattleScene extends Phaser.Scene {
 
     // Releasing over a HUD panel arrives as pointerupoutside; handle it the same way so drags never stick.
     const release = (p: Phaser.Input.Pointer) => {
-      if (this.pan) {
+      if (p.button === 1) {
         this.pan = null;
         return;
       }
       const d = this.drag;
       this.drag = null;
-      if (!d) return;
+      if (d?.panning) this.pan = null;
+      if (!d || (d.panning && d.moved)) return;
       const end = { x: p.worldX, y: p.worldY };
-      if (d.button === 0) this.leftRelease(d, end, p.event.shiftKey, p.event.shiftKey || p.event.ctrlKey || p.event.metaKey);
+      if (d.button === 0) this.leftRelease(d, end, p.event.shiftKey, p.event.ctrlKey || p.event.metaKey);
       if (d.button === 2) this.rightRelease(d, end);
     };
     this.input.on('pointerup', release);
@@ -357,7 +360,7 @@ export class BattleScene extends Phaser.Scene {
     const x1 = Math.max(d.start.x, end.x);
     const y0 = Math.min(d.start.y, end.y);
     const y1 = Math.max(d.start.y, end.y);
-    // A new box replaces the selection; hold Shift or Ctrl to add to it.
+    // A new box replaces the selection; hold Ctrl as well to add to it.
     if (!add) this.selected.clear();
     for (const u of this.world.units) {
       if (u.side === PLAYER && u.state !== 'routing' && u.x >= x0 && u.x <= x1 && u.y >= y0 && u.y <= y1) this.selected.add(u.id);
@@ -597,15 +600,6 @@ export class BattleScene extends Phaser.Scene {
     if (this.keys['d'] || this.keys['arrowright']) sx += v;
     if (this.keys['w'] || this.keys['arrowup']) sy -= v;
     if (this.keys['s'] || this.keys['arrowdown']) sy += v;
-    // Pushing the mouse against the edge of the battlefield scrolls it, as in most strategy games.
-    const ptr = this.input.activePointer;
-    const edge = 12;
-    if (this.overCanvas && this.pointerSeen && document.hasFocus() && !this.pan) {
-      if (ptr.x < edge) sx -= v;
-      if (ptr.x > cam.width - edge) sx += v;
-      if (ptr.y < edge) sy -= v;
-      if (ptr.y > cam.height - edge) sy += v;
-    }
     if (!sx && !sy) return;
     const d = screenToWorldDir(sx, sy);
     cam.scrollX += d.x;
@@ -877,7 +871,7 @@ export class BattleScene extends Phaser.Scene {
 
     // Drag feedback.
     const d = this.drag;
-    if (d && d.moved && d.button === 0 && !this.pendingCallIn && !this.aiming) {
+    if (d && d.moved && d.button === 0 && !d.panning && !this.pendingCallIn) {
       o.lineStyle(2, 0xfffaf0, 0.9);
       o.strokeRect(Math.min(d.start.x, d.current.x), Math.min(d.start.y, d.current.y), Math.abs(d.current.x - d.start.x), Math.abs(d.current.y - d.start.y));
     }
