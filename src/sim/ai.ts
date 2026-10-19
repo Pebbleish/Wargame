@@ -75,7 +75,9 @@ export const DOCTRINES: Doctrine[] = [
  * The AI's tunable numbers. Tests and self-play tuning can hand an AI its own copy; the game uses these.
  * The values were tuned by self-play: mutants played the champion over thousands of battles, and changes were
  * kept only when they won at least 54% of 120 confirming battles. Re-tuned after the rally, comeback, river and
- * garrison changes (three changes kept out of twenty rounds).
+ * garrison changes (three changes kept out of twenty rounds). Then re-tuned with bigger self-play: each change
+ * screened on 80 battles, kept only after winning at least 53.5% of 320 more and doing no worse against three
+ * earlier AIs (one change kept out of ten rounds).
  */
 export const PARAMS = {
   ground: 0, // weight on cover and high ground when garrisons pick where to stand (0 ignores the ground)
@@ -90,7 +92,7 @@ export const PARAMS = {
   needPull: 150, // pull for each regiment an objective still needs
   hqBack: 313, // how far behind the line the general rides
   wagonsBack: 348, // and the wagons
-  shyOf: 700, // the general and wagons fall back when enemy troops come this close
+  shyOf: 577, // the general and wagons fall back when enemy troops come this close
   raidReach: 860, // how far raiding cavalry goes after guns, wagons and the general
   cavReach: 673, // how far other cavalry does
   cavMorale: 50, // cavalry only charges above this morale
@@ -123,7 +125,7 @@ export const PARAMS = {
   rescue: 1, // regiments go to the help of routing friends being ridden down by cavalry (0 never)
   comeback: 1, // when behind on army morale, attacks objectives the enemy holds to win morale back (0 never)
   comebackGap: 8, // how far behind counts
-  comebackWorth: 1.6, // how much more an enemy-held objective is worth then
+  comebackWorth: 1.28, // how much more an enemy-held objective is worth then
   horseAlert: 0, // an empty home town gets a garrison back when enemy cavalry comes this close (0: no special case; 1800 lost 46%)
   groupPress: 0, // spare regiments only pounce together, two or more on the same enemy at once (0: one at a time; 1 lost 47%)
   pontoon: 0, // on river maps, engineers bridge the river away from the crossings once a battle (0 never; 1 lost 46%)
@@ -140,12 +142,28 @@ export const PARAMS = {
   requisitionLead: -5, // and this far ahead of the enemy's (negative: no further behind than this)
   callAtAttack: 1, // reinforcements arrive on the flank of the map an attack is going in on
   flankCross: 1, // an attack over a defended river crossing forms up across another, quieter one instead (0 never)
-  flankOdds: 0.5, // when the enemy near that crossing is at most this share of the defence of the direct way
+  flankOdds: 0.3, // when the enemy near that crossing is at most this share of the defence of the direct way
   look: 0, // before launching an attack, plays the battle forward to see whether attacking beats holding (0 never: no gain in tests yet)
   lookAhead: 75, // seconds of battle each look-ahead plays forward
   lookTicks: 8, // look-ahead ticks played per battle tick, so the look is spread over a few seconds of battle
   lookEvery: 20, // seconds between looks
   lookMargin: 2, // an attack must come out at least this much better than holding
+  front: 0, // reads the whole front in three sectors and attacks where force can be massed against a weak point (0: local odds only; 1 lost 41%)
+  frontRatio: 1.5, // attack a sector when the force we could mass there is this much stronger than the enemy in it
+  frontHold: 0.8, // each other sector keeps this share of the enemy strength facing it, and sends the rest to the attack
+  frontWill: 1, // and launches attacks wherever that is so, not only when the battle plan calls for one (0: the plan decides)
+  frontReserve: 0, // with no attack on, spare regiments go to the sector where the enemy most outweighs us (0: to the hottest objective)
+  focusTargets: 0, // goes for at most this many of the places the enemy holds at once (0: all of them; 1 won 51% of 800)
+  needCap: 2, // most extra regiments an objective asks for because of enemies near it
+  frontPull: 1, // garrisons in quiet sectors leave their posts to join the attack (0: only spare regiments go)
+  fightLook: 0, // once an attack goes in, plays the fight forward to see whether pressing on beats falling back (0: rules of thumb; no gain in tests)
+  fightAhead: 45, // seconds of battle each of those looks plays forward
+  fightTicks: 20, // look-ahead ticks played per battle tick
+  fightEvery: 15, // seconds between looks
+  fightMargin: 0, // falling back must come out at least this much better than pressing on
+  standLook: 0, // where our troops are fighting a stronger enemy at a town, plays it forward to see whether standing beats giving it up (0 never; 1 won 52%)
+  standOdds: 0.8, // looks when the enemy there is at least this share of our strength there
+  standFor: 30, // seconds a town given up is left alone
 };
 
 // Which battle plan answers which enemy habit, from playing every plan against every other (60 battles a pair):
@@ -191,6 +209,7 @@ export interface AIOptions {
 
 /** A look-ahead in progress: the battle as this side knows it, played forward once for each option. */
 interface Look {
+  kind: 'attack' | 'fight' | 'stand'; // whether to launch an attack, press on with one under way, or stand at a town
   start: World;
   options: (number | null)[]; // objectives to attack, or null to hold
   scores: number[];
@@ -198,6 +217,17 @@ interface Look {
   ais: AI[];
   ends: number;
 }
+
+/** The front in three sectors, north to south: strength on each side, and what each sector can spare. */
+interface Front {
+  enemy: number[]; // enemy strength seen in each sector
+  ours: number[]; // our fighting strength in each sector
+  hold: number[]; // what each sector must keep to hold against the enemy facing it
+  spare: number[]; // what each sector could send elsewhere
+  massed: number[]; // the force we could bring to bear in each sector, its own plus what the others can spare
+}
+
+const sectorOf = (p: Vec) => (p.y < MAP.height / 3 ? 0 : p.y < (2 * MAP.height) / 3 ? 1 : 2);
 
 /** A shell seen landing, remembered a little longer than the smoke lasts. */
 interface Shell {
@@ -241,11 +271,15 @@ export class AI {
   private seed: number;
   private look: Look | null = null;
   private lookAt = 60;
-  private verdict: { target: number | null; at: number } | null = null; // what the last look-ahead decided
+  private verdict: { target: number | null; at: number; kind: Look['kind'] } | null = null;
+  private fightAt = 0; // next battle time a fight may be looked ahead
+  private standAt = 0; // and a stand at a town
+  private abandon = new Map<number, number>(); // towns given up after a look-ahead, until when // what the last look-ahead decided
   private fixed: number | null | undefined = undefined;
   private bridgeAt = new Map<number, Vec>(); // engineers on their way to bridge the river, and where
   private bridged = false; // this army has thrown its own bridge over the river
   private flankFor: number | null = null; // the attack the flank crossing below was chosen for
+  private front: Front | null = null;
   private flank: Vec | null = null; // where that attack forms up beyond a quieter crossing, if anywhere // in a look-ahead copy: the attack it must make (null: none)
 
   /** Battle plan from the battle's seed (or given), so a replay of the same seed fights the same way. */
@@ -339,7 +373,7 @@ export class AI {
 
   /** Objectives in order of how much this side wants them, with how many regiments each needs. */
   private needs(world: World): { pos: Vec; need: number }[] {
-    return OBJECTIVES.map((o, i) => {
+    const needs = OBJECTIVES.map((o, i) => {
       const enemyNear = world.units.filter((u) => u.side !== this.side && u.seen[this.side] && u.state !== 'routing' && dist(u, o) < 600).length;
       const owned = world.owners[i] === this.side;
       let need = o.centre && o.kind === 'bridge' ? 3 : 2;
@@ -352,10 +386,28 @@ export class AI {
           && (dist(u, o) < reach || (o.home === this.side && u.type === 'cavalry' && dist(u, o) < this.params.horseAlert)));
         need = threat ? 1 : 0;
       }
-      need += Math.min(2, enemyNear);
+      need += Math.min(this.params.needCap, enemyNear);
       if (owned && this.plan.posture === 'defend' && enemyNear > 0) need += 1;
+      if ((this.abandon.get(i) ?? -1) > world.time) need = 0;
       return { pos: { x: o.x, y: o.y }, need };
     });
+    // Rather than send troops at every place the enemy holds at once, go for the few most worth it, in strength.
+    const n = this.params.focusTargets;
+    if (n > 0) {
+      const mine = world.units.filter((u) => u.side === this.side && u.state !== 'routing');
+      const anchor = this.frontAnchor(mine);
+      const F = this.params.front > 0 ? this.front : null;
+      const theirs = OBJECTIVES.map((_, i) => i).filter((i) => world.owners[i] === 1 - this.side);
+      const score = (i: number) => {
+        const o = OBJECTIVES[i];
+        const s = sectorOf(o);
+        const massing = F ? Math.min(2, F.massed[s] / Math.max(300, F.enemy[s])) : 1;
+        return (massing * 1000) / (this.enemyPowerNear(o, 600) + 300) - dist(anchor, o) * 0.4 + (i === this.plan.target ? 1 : 0);
+      };
+      const keep = new Set(theirs.sort((a, b) => score(b) - score(a)).slice(0, n));
+      for (const i of theirs) if (!keep.has(i)) needs[i].need = 0;
+    }
+    return needs;
   }
 
   private orders(world: World): Command[] {
@@ -378,8 +430,9 @@ export class AI {
     // Greedy assignment: each regiment takes the nearest objective that still needs troops.
     // Regiments left over once every objective is covered join the attack on the hottest objective, from a flank.
     const assigned = new Map<number, Vec>();
+    const goalOf = new Map<number, number>(); // objective each posted regiment was given
     const spare = new Set<number>();
-    const hot = this.hotObjective(world, visibleEnemies);
+    const hot = (P.frontReserve > 0 ? this.threatened(world) : null) ?? this.hotObjective(world, visibleEnemies);
     const infantry = mine.filter((u) => u.type === 'line' || u.type === 'light');
     // Worn regiments pull back to rest before they break, and come back once recovered.
     for (const u of infantry) {
@@ -419,7 +472,9 @@ export class AI {
       needs[best].need -= 1;
       assigned.set(u.id, needs[best].pos);
       this.lastGoal.set(u.id, best);
+      goalOf.set(u.id, best);
     }
+    if (this.front && P.front > 0 && P.frontPull > 0 && this.plan.target !== null) this.pullToAttack(world, infantry, visibleEnemies, goalOf, assigned, spare);
     const assaultOrders = this.plan.target !== null ? this.assaultOrders(world, cmds, mine, visibleEnemies) : new Set<number>();
 
     const helpers = this.assignHelpers(world, mine, visibleEnemies, assigned, spare);
@@ -597,17 +652,48 @@ export class AI {
   }
 
   /**
+   * Mass for the attack: regiments posted in other sectors leave for it, as long as their sector keeps enough to
+   * hold against the enemy facing it and every objective we hold keeps one regiment. Quiet posts go first.
+   */
+  private pullToAttack(world: World, infantry: Unit[], enemies: Unit[], goalOf: Map<number, number>, assigned: Map<number, Vec>, spare: Set<number>) {
+    const F = this.front!;
+    const t = this.plan.target!;
+    const ts = sectorOf(OBJECTIVES[t]);
+    const left = F.ours.slice();
+    const posted = new Map<number, number>();
+    for (const g of goalOf.values()) posted.set(g, (posted.get(g) ?? 0) + 1);
+    const quiet = (i: number) => !enemies.some((e) => e.state !== 'routing' && !isSupport(e) && dist(e, OBJECTIVES[i]) < 700);
+    const candidates = infantry.filter((u) => {
+      const g = goalOf.get(u.id);
+      return g !== undefined && g !== t && sectorOf(OBJECTIVES[g]) !== ts && u.meleeWith === null && u.underFire <= 0;
+    }).sort((a, b) => (quiet(goalOf.get(b.id)!) ? 1 : 0) - (quiet(goalOf.get(a.id)!) ? 1 : 0) || dist(a, OBJECTIVES[t]) - dist(b, OBJECTIVES[t]) || a.id - b.id);
+    for (const u of candidates) {
+      const g = goalOf.get(u.id)!;
+      const s = sectorOf(OBJECTIVES[g]);
+      const v = this.value(u);
+      if (world.owners[g] === this.side && (posted.get(g) ?? 0) <= 1) continue;
+      if (left[s] - v < F.hold[s]) continue;
+      left[s] -= v;
+      posted.set(g, (posted.get(g) ?? 0) - 1);
+      goalOf.delete(u.id);
+      this.assault.add(u.id);
+      assigned.set(u.id, OBJECTIVES[t]);
+      spare.add(u.id);
+    }
+  }
+
+  /**
    * Start a look-ahead. The copy of the battle holds only what this side knows: its own troops, and enemies in
    * sight or remembered where they were last seen. Enemies it has not seen are left out.
    */
-  private startLook(world: World, options: (number | null)[]) {
+  private startLook(world: World, options: (number | null)[], kind: Look['kind'] = 'attack') {
     const start = world.clone();
     start.units = start.units.filter((e) => e.side === this.side || e.seen[this.side] || this.memory.has(e.id));
     for (const e of start.units) {
       const s = this.memory.get(e.id);
       if (e.side !== this.side && !e.seen[this.side] && s) { e.x = s.x; e.y = s.y; }
     }
-    this.look = { start, options, scores: [], sim: null, ais: [], ends: 0 };
+    this.look = { kind, start, options, scores: [], sim: null, ais: [], ends: 0 };
   }
 
   /** Play the look-ahead on a few ticks, and settle on the best option once each has been played. */
@@ -617,11 +703,12 @@ export class AI {
     // Works and bridges dug in the look-ahead must not appear on the real map.
     const works = EARTHWORKS.length;
     const crossings = CROSSINGS.length;
-    for (let k = 0; k < P.lookTicks; k++) {
+    const fight = L.kind === 'fight';
+    for (let k = 0; k < (fight ? P.fightTicks : P.lookTicks); k++) {
       if (!L.sim) {
         L.sim = L.start.clone();
-        L.ais = [this.copyFor(L.options[L.scores.length]), new AI((1 - this.side) as Side, this.seed, { params: { look: 0 } })];
-        L.ends = L.sim.time + P.lookAhead;
+        L.ais = [this.copyFor(L.options[L.scores.length], L.kind), new AI((1 - this.side) as Side, this.seed, { params: { look: 0, fightLook: 0, standLook: 0 } })];
+        L.ends = L.sim.time + (fight ? P.fightAhead : P.lookAhead);
       }
       for (const ai of L.ais) for (const c of ai.update(L.sim)) L.sim.apply(c);
       L.sim.step();
@@ -634,26 +721,28 @@ export class AI {
     EARTHWORKS.length = works;
     CROSSINGS.length = crossings;
     if (L.scores.length < L.options.length) return;
-    // Holding is the default: an attack has to come out clearly better.
+    // The first option is the default (holding, or pressing on): another has to come out clearly better.
+    const margin = fight ? P.fightMargin : P.lookMargin;
     let pick = 0;
-    for (let i = 1; i < L.options.length; i++) if (L.scores[i] > L.scores[pick] + (pick === 0 ? P.lookMargin : 0)) pick = i;
-    this.verdict = { target: L.options[pick], at: world.time };
+    for (let i = 1; i < L.options.length; i++) if (L.scores[i] > L.scores[pick] + (pick === 0 ? margin : 0)) pick = i;
+    this.verdict = { target: L.options[pick], at: world.time, kind: L.kind };
     this.look = null;
-    this.lookAt = world.time + P.lookEvery;
+    if (!fight) this.lookAt = world.time + P.lookEvery;
   }
 
   /** A copy of this AI for a look-ahead, committed to one option and not looking ahead itself. */
-  private copyFor(target: number | null): AI {
+  private copyFor(target: number | null, kind: Look['kind'] = 'attack'): AI {
     const { look, verdict, ...rest } = this as unknown as { look: unknown; verdict: unknown };
     void look; void verdict;
     const c = Object.assign(Object.create(AI.prototype), structuredClone(rest)) as AI;
     c.look = null;
     c.verdict = null;
-    c.fixed = target;
+    c.fixed = kind === 'stand' ? undefined : target;
+    if (kind === 'stand' && target !== null) c.abandon.set(target, Infinity);
     c.lastThink = -999;
     c.plan.madeAt = -999;
     c.doctrine = this.doctrine;
-    (c as { params: Params }).params = { ...this.params, look: 0 };
+    (c as { params: Params }).params = { ...this.params, look: 0, fightLook: 0, standLook: 0 };
     return c;
   }
 
@@ -973,6 +1062,45 @@ export class AI {
     }
   }
 
+  /** The objective we hold nearest the enemy in the sector where the enemy most outweighs us, if it does anywhere. */
+  private threatened(world: World): Vec | null {
+    const F = this.front;
+    if (!F) return null;
+    let s = -1;
+    let gap = 0;
+    for (let i = 0; i < 3; i++) if (F.enemy[i] - F.ours[i] > gap) { gap = F.enemy[i] - F.ours[i]; s = i; }
+    if (s < 0) return null;
+    const foes = [...this.memory.values()].filter((e) => sectorOf(e) === s);
+    const centre = foes.length ? { x: foes.reduce((a, e) => a + e.x, 0) / foes.length, y: foes.reduce((a, e) => a + e.y, 0) / foes.length } : null;
+    let best: Vec | null = null;
+    let bd = Infinity;
+    OBJECTIVES.forEach((o, i) => {
+      if (world.owners[i] !== this.side || sectorOf(o) !== s || !centre) return;
+      const d = dist(o, centre);
+      if (d < bd) { bd = d; best = o; }
+    });
+    return best;
+  }
+
+  /** Strength on each side in each sector of the front, and what each sector could spare for an attack elsewhere. */
+  private readFront(mine: Unit[]): Front {
+    const enemy = [0, 0, 0];
+    const ours = [0, 0, 0];
+    const mobile = [0, 0, 0];
+    for (const s of this.memory.values()) enemy[sectorOf(s)] += s.value;
+    for (const u of mine) {
+      if (isSupport(u) || u.type === 'engineers') continue;
+      const v = this.value(u);
+      ours[sectorOf(u)] += v;
+      if (u.type !== 'artillery') mobile[sectorOf(u)] += v;
+    }
+    const hold = enemy.map((e) => e * this.params.frontHold);
+    const spare = ours.map((o, i) => Math.min(mobile[i], Math.max(0, o - hold[i])));
+    const total = spare.reduce((a, b) => a + b, 0);
+    const massed = ours.map((o, i) => o + total - spare[i]);
+    return { enemy, ours, hold, spare, massed };
+  }
+
   private enemyPowerNear(p: Vec, r: number): number {
     let sum = 0;
     for (const s of this.memory.values()) if (dist(s, p) < r) sum += s.value;
@@ -989,8 +1117,10 @@ export class AI {
     const t = p.target;
     // Drop a target once it is ours and clear of the enemy.
     if (t !== null && world.owners[t] === this.side && this.enemyPowerNear(OBJECTIVES[t], 500) === 0) this.endAttack(world, false);
+    this.standOrGo(world, mine);
     if (world.time - p.madeAt < 10) return;
     p.madeAt = world.time;
+    if (P.front > 0 || P.frontReserve > 0) this.front = this.readFront(mine);
 
     const ours = mine.reduce((a, u) => a + this.value(u), 0);
     let theirs = 0;
@@ -1011,6 +1141,9 @@ export class AI {
       return;
     }
     if (world.time < p.restUntil) return;
+    // The whole front at a glance: where could we mass more force than the enemy has there?
+    const F = P.front > 0 ? this.front : null;
+    const odds = (i: number) => (F ? F.massed[sectorOf(OBJECTIVES[i])] / Math.max(300, F.enemy[sectorOf(OBJECTIVES[i])]) : 0);
 
     // Check the attack in progress is still worth pressing.
     const group = mine.filter((u) => this.assault.has(u.id));
@@ -1019,7 +1152,21 @@ export class AI {
       this.endAttack(world, true);
       return;
     }
-    if (p.target !== null && p.phase === 'assault' && group.length) {
+    if (p.target !== null && p.phase === 'assault' && group.length && P.fightLook > 0 && this.fixed === undefined) {
+      // Rather than a rule of thumb, play the fight forward both ways: pressing on, and calling the attack off.
+      const v = this.verdict;
+      if (v && v.kind === 'fight' && world.time - v.at < 10) {
+        this.verdict = null;
+        if (v.target === null) {
+          this.endAttack(world, true);
+          return;
+        }
+      }
+      if (!this.look && world.time >= this.fightAt) {
+        this.startLook(world, [p.target, null], 'fight');
+        this.fightAt = world.time + P.fightEvery;
+      }
+    } else if (p.target !== null && p.phase === 'assault' && group.length) {
       const morale = group.reduce((a, u) => a + u.morale, 0) / group.length;
       const local = group.reduce((a, u) => a + this.value(u), 0);
       if (morale < P.abortMorale || local < this.enemyPowerNear(OBJECTIVES[p.target], 600) * P.abortOdds) {
@@ -1048,7 +1195,9 @@ export class AI {
         * (behind && world.owners[i] === 1 - this.side ? P.comebackWorth : 1);
       // A one-wing plan prefers objectives on its chosen flank.
       const onWing = this.doctrine.wing && (o.y - MAP.height / 2) * this.dir() * this.wingSign > 200 ? 1.5 : 1;
-      const score = (worth * onWing * 1000) / (defence + 300) - dist(anchor, o) * 0.4 + (i === p.target ? 0.6 : 0);
+      // Reading the whole front, the sector where we can mass the most against the least is the place to strike.
+      const massing = F ? Math.min(2, odds(i) / P.frontRatio) : 1;
+      const score = (worth * onWing * massing * 1000) / (defence + 300) - dist(anchor, o) * 0.4 + (i === p.target ? 0.6 : 0);
       ranked.push([score, i]);
       if (score > bestScore) { bestScore = score; best = i; }
     });
@@ -1056,7 +1205,8 @@ export class AI {
     // In test battles, holding objectives and letting the enemy come beat attacking whenever ahead, so a set-piece
     // attack is only launched when the army must: late in the battle and behind, or holding no objective at all.
     // The rest of the time, spare regiments still pounce wherever they have the numbers.
-    const willing = (this.doctrine.attack === 'stronger' && p.posture === 'attack') || (behind && ratio > 0.8);
+    const willing = (this.doctrine.attack === 'stronger' && p.posture === 'attack') || (behind && ratio > 0.8)
+      || (F !== null && P.frontWill > 0 && best !== null && odds(best) > P.frontRatio);
     if (this.fixed !== undefined) {
       // A look-ahead copy makes the attack it was given, or none.
       best = this.fixed !== null && world.owners[this.fixed] !== this.side ? this.fixed : null;
@@ -1066,7 +1216,7 @@ export class AI {
       if (!this.look && p.target === null && world.time >= this.lookAt && ranked.length) {
         this.startLook(world, [null, ...ranked.slice(0, 2).map(([, i]) => i)]);
       }
-      const v = this.verdict;
+      const v = this.verdict?.kind === 'attack' ? this.verdict : null;
       const attacking = v && v.target !== null && p.target === v.target && world.owners[v.target] !== this.side;
       const fresh = v && world.time - v.at < 20;
       if (attacking) best = v.target;
@@ -1081,6 +1231,32 @@ export class AI {
         p.phaseAt = world.time;
       }
     }
+  }
+
+  /**
+   * Where our troops are fighting a stronger enemy for a town, play it forward both ways: standing, and giving the
+   * town up so its defenders go elsewhere. Gives it up for a while when that comes out better.
+   */
+  private standOrGo(world: World, mine: Unit[]) {
+    const P = this.params;
+    if (P.standLook <= 0 || this.fixed !== undefined) return;
+    const v = this.verdict;
+    if (v && v.kind === 'stand') {
+      this.verdict = null;
+      if (v.target !== null && world.time - v.at < 10) this.abandon.set(v.target, world.time + P.standFor);
+    }
+    if (this.look || world.time < this.standAt) return;
+    let pick: number | null = null;
+    let worst = P.standOdds;
+    OBJECTIVES.forEach((o, i) => {
+      if ((this.abandon.get(i) ?? -1) > world.time) return;
+      const ours = mine.filter((u) => !isSupport(u) && dist(u, o) < 600).reduce((a, u) => a + this.value(u), 0);
+      const theirs = this.enemyPowerNear(o, 600);
+      if (ours > 0 && theirs / ours >= worst) { worst = theirs / ours; pick = i; }
+    });
+    if (pick === null) return;
+    this.startLook(world, [null, pick], 'stand');
+    this.standAt = world.time + P.fightEvery;
   }
 
   private endAttack(world: World, failed: boolean) {
