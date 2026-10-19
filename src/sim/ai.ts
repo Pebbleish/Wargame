@@ -117,6 +117,9 @@ export const PARAMS = {
   reserveFrom: 7, // keep a reserve once there are this many infantry regiments
   helpRange: 1500, // how far idle regiments go to help one under attack
   helpers: 2, // how many go
+  homeReach: 1100, // a home town we hold keeps a garrison only while an enemy is within this (other towns: garrisonThreat)
+  postSafe: 900, // a lone garrison may leave to help when no enemy is within this of its post
+  rescue: 1, // regiments go to the help of routing friends being ridden down by cavalry (0 never)
   rally: 1, // the general rides out to rally broken regiments when it can do so safely (0 never does)
   rallyReach: 1500, // how far the general goes to reach them
   pursue: 1, // cavalry rides down routing regiments before they can rally (0 treats them like any other prey)
@@ -326,7 +329,7 @@ export class AI {
       if (owned && enemyNear === 0) {
         // A town we hold is only garrisoned while the enemy is within striking distance of it (further for home
         // towns, since losing everything loses the battle).
-        const reach = o.home === this.side ? RULES.garrisonThreat * 1.4 : RULES.garrisonThreat;
+        const reach = o.home === this.side ? this.params.homeReach : RULES.garrisonThreat;
         const threat = world.units.some((u) => u.side !== this.side && u.seen[this.side] && u.state !== 'routing' && dist(u, o) < reach);
         need = threat ? 1 : 0;
       }
@@ -400,7 +403,7 @@ export class AI {
     }
     const assaultOrders = this.plan.target !== null ? this.assaultOrders(world, cmds, mine, visibleEnemies) : new Set<number>();
 
-    const helpers = this.assignHelpers(mine, visibleEnemies, assigned, spare);
+    const helpers = this.assignHelpers(world, mine, visibleEnemies, assigned, spare);
     const footNear = (p: Vec, r: number) => visibleEnemies.some((e) => e.state !== 'routing' && !isSupport(e) && e.type !== 'artillery' && dist(e, p) < r);
 
     for (const u of mine) {
@@ -804,7 +807,7 @@ export class AI {
    * Regiments under attack call for help: up to two idle regiments nearby (spares, or garrisons that are not
    * an objective's only defender) move to fire into the attacker's flank.
    */
-  private assignHelpers(mine: Unit[], enemies: Unit[], assigned: Map<number, Vec>, spare: Set<number>) {
+  private assignHelpers(world: World, mine: Unit[], enemies: Unit[], assigned: Map<number, Vec>, spare: Set<number>) {
     const helpers = new Map<number, { spot: Vec; dist: number; attacker: Unit }>();
     const busy = (m: Unit) => m.meleeWith !== null || m.underFire > 0 || m.building > 0
       || enemies.some((e) => e.state !== 'routing' && dist(e, m) < 600);
@@ -812,15 +815,23 @@ export class AI {
       if (spare.has(m.id)) return true;
       const goal = assigned.get(m.id);
       if (!goal) return false;
-      // Another regiment shares this post, so this one can leave.
-      return mine.some((o) => o.id !== m.id && (o.type === 'line' || o.type === 'light') && dist(o, goal) < 300);
+      // Another regiment shares this post, so this one can leave; or no enemy is anywhere near the post.
+      return mine.some((o) => o.id !== m.id && (o.type === 'line' || o.type === 'light') && dist(o, goal) < 300)
+        || !enemies.some((e) => e.state !== 'routing' && !isSupport(e) && dist(e, goal) < this.params.postSafe);
     };
     const free = mine.filter((m) => (m.type === 'line' || m.type === 'light') && m.morale > 60 && !busy(m) && canSpare(m));
     const pressed = mine.filter((m) => !isSupport(m) && (m.underFire > 0 || m.meleeWith !== null));
+    // Routing friends with enemy horse on their heels are worth saving too: a volley drives the cavalry off.
+    if (this.params.rescue > 0) {
+      for (const r of world.units) {
+        if (r.side !== this.side || r.state !== 'routing') continue;
+        if (enemies.some((e) => e.type === 'cavalry' && e.state !== 'routing' && dist(e, r) < 300)) pressed.push(r);
+      }
+    }
     for (const friend of pressed) {
       const attacker = enemies
         .filter((e) => e.state !== 'routing' && (friend.meleeWith === e.id || dist(e, friend) < 450))
-        .sort((a, b) => dist(a, friend) - dist(b, friend))[0];
+        .sort((a, b) => (a.type === 'cavalry' ? 0 : 1) - (b.type === 'cavalry' ? 0 : 1) || dist(a, friend) - dist(b, friend))[0];
       if (!attacker) continue;
       const near = free.filter((m) => !helpers.has(m.id) && dist(m, attacker) < this.params.helpRange).sort((a, b) => dist(a, attacker) - dist(b, attacker));
       for (const m of near.slice(0, Math.round(this.params.helpers))) {
