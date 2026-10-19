@@ -54,7 +54,23 @@ export interface Unit {
   reload: number; // artillery: seconds until the next shell
   suppliedUntil: number; // battle time until which the last supply cart to reach this unit keeps it supplied
   cartAt: number; // supply wagons: battle time the next cart can leave
+  shotAt: number | null; // the enemy it fired at last, which it keeps shooting while that still makes sense
 }
+
+/**
+ * What regiments do for themselves without orders. Every switch is on in the game; tests turn them off for one
+ * side to measure what each is worth.
+ */
+export interface Smarts {
+  target: boolean; // shoot the shakiest enemy in front, not just the nearest
+  brace: boolean; // stop and face cavalry charging in
+  bait: boolean; // do not leave position to go after attackers that are dug in, in cover or stronger
+  fallBack: boolean; // a wavering regiment with no orders steps back out of musket range to recover
+  shells: boolean; // marching troops go round ground the enemy guns are shelling
+  ammo: boolean; // a regiment out of ammunition with nothing to do walks to the supply wagons
+}
+
+export const ALL_SMARTS: Smarts = { target: true, brace: true, bait: true, fallBack: true, shells: true, ammo: true };
 
 export interface Impact {
   x: number;
@@ -230,6 +246,7 @@ export class World {
   result: Result | null = null;
   impacts: Impact[] = [];
   carts: Cart[] = [];
+  smarts: [Smarts, Smarts] = [{ ...ALL_SMARTS }, { ...ALL_SMARTS }];
   private lastCartLog: [number, number] = [-99, -99];
   rng: Rng;
   private nextId = 1;
@@ -356,6 +373,7 @@ export class World {
       reload: 0,
       suppliedUntil: 0,
       cartAt: 0,
+      shotAt: null,
       brigade: opts.brigade ?? this.brigadeFor(side, type),
       fatigue: 0,
       ammo: 100,
@@ -742,6 +760,8 @@ export class World {
 
     this.retaliate(u);
     this.build(u);
+    this.fallBack(u, enemies);
+    this.fetchAmmo(u);
 
     // Work out where the unit wants to go.
     let goal: Vec | null = null;
@@ -782,6 +802,13 @@ export class World {
     if (goal && u.type === 'general' && u.order.kind === 'move' && u.meleeWith !== null) {
       for (const e of enemies) if (e.meleeWith === u.id) e.meleeWith = null;
       u.meleeWith = null;
+    }
+    // Troops on the move halt and turn to face cavalry charging at them, rather than take it in the flank.
+    const horse = this.chargingHorse(u, enemies);
+    if (horse) {
+      goal = null;
+      u.marching = false;
+      if (u.meleeWith === null) u.facing = this.turnToward(u, Math.atan2(horse.y - u.y, horse.x - u.x));
     }
     if (goal && u.meleeWith === null) this.moveToward(u, goal, enemies, target);
     // Leaving prepared positions gives up the fortification.
@@ -903,6 +930,100 @@ export class World {
     if (base) u.ammo = Math.min(100, u.ammo + RULES.resupplyRate * 0.5 * DT);
   }
 
+  /** A rough measure of a regiment's fighting strength, for deciding whether to take it on. */
+  private strength(u: Unit): number {
+    return u.men * UNIT_TYPES[u.type].shock * (0.3 + Math.max(0, u.morale) / 100) * (u.state === 'wavering' ? 0.6 : 1);
+  }
+
+  /** Enemy cavalry charging at this foot regiment and close, if it has the sense to see it coming. */
+  private chargingHorse(u: Unit, enemies: Unit[]): Unit | undefined {
+    if (!this.smarts[u.side].brace || u.type === 'cavalry' || u.type === 'artillery' || isSupport(u) || u.meleeWith !== null) return undefined;
+    if (u.order.kind === 'attack') return undefined;
+    for (const e of enemies) {
+      if (e.type !== 'cavalry' || e.state === 'routing' || !e.seen[u.side]) continue;
+      if (e.order.kind === 'attack' && e.order.target === u.id && dist(e, u) < 300) return e;
+    }
+    return undefined;
+  }
+
+  /**
+   * Where to head for so as to go round ground the enemy guns are shelling, rather than straight through it.
+   * Returns the goal itself when the way is clear, or the unit is already under the shells.
+   */
+  private aroundShellfire(u: Unit, goal: Vec, enemies: Unit[]): Vec {
+    if (!this.smarts[u.side].shells || u.type === 'artillery' || u.order.kind !== 'move') return goal;
+    const r = RULES.bombardRadius + RULES.shellBlast + 20;
+    for (const g of enemies) {
+      const z = g.fireZone;
+      if (g.type !== 'artillery' || !z || this.time - g.firedAt > 8 || !g.seen[u.side]) continue;
+      if (dist(u, z) < r || dist(goal, z) < r) continue;
+      // Closest point of the straight path to the shelled spot.
+      const dx = goal.x - u.x;
+      const dy = goal.y - u.y;
+      const len2 = dx * dx + dy * dy || 1;
+      const t = Math.max(0, Math.min(1, ((z.x - u.x) * dx + (z.y - u.y) * dy) / len2));
+      const c = { x: u.x + dx * t, y: u.y + dy * t };
+      const off = dist(c, z);
+      if (off >= r) continue;
+      // Step out to the side the path already passes on, clear of the shelling.
+      const nx = off > 1 ? (c.x - z.x) / off : -dy / Math.sqrt(len2);
+      const ny = off > 1 ? (c.y - z.y) / off : dx / Math.sqrt(len2);
+      const p = clampToMap({ x: z.x + nx * r * 1.2, y: z.y + ny * r * 1.2 });
+      if (crossesRiver(u, p) || crossesRiver(p, goal)) continue;
+      return p;
+    }
+    return goal;
+  }
+
+  /** A wavering regiment left without orders steps back out of musket range to recover, before it breaks. */
+  private fallBack(u: Unit, enemies: Unit[]) {
+    if (!this.smarts[u.side].fallBack || u.state !== 'wavering' || u.order.kind !== 'hold' || u.holdPosition) return;
+    if (u.meleeWith !== null || u.formation === 'fortified' || u.building > 0 || isSupport(u) || u.type === 'artillery') return;
+    // Turning its back on nearby horse would invite a charge in the rear.
+    if (enemies.some((e) => e.type === 'cavalry' && e.state !== 'routing' && dist(e, u) < 400)) return;
+    // A garrison stays: giving up the objective costs more than the regiment.
+    if (OBJECTIVES.some((o) => dist(o, u) < RULES.captureRadius + 100)) return;
+    let threat: Unit | undefined;
+    let td = Infinity;
+    for (const e of enemies) {
+      if (e.state === 'routing' || !e.seen[u.side] || UNIT_TYPES[e.type].range <= 0 || e.type === 'artillery') continue;
+      const d = dist(u, e);
+      if (d < td) { td = d; threat = e; }
+    }
+    if (!threat) return;
+    const reach = UNIT_TYPES[threat.type].range * (terrainAt(threat).hill ? 1.2 : 1);
+    if (td > reach) return;
+    // Only when it is close to breaking and outgunned: stepping back costs volleys and ground.
+    const shooters = enemies.filter((e) => e.state !== 'routing' && e.seen[u.side] && UNIT_TYPES[e.type].range > 0 && e.type !== 'artillery' && dist(e, u) <= UNIT_TYPES[e.type].range).length;
+    if (u.morale > 25 || shooters < 2) return;
+    const back = reach - td + 80;
+    const p = clampToMap({ x: u.x + ((u.x - threat.x) / td) * back, y: u.y + ((u.y - threat.y) / td) * back });
+    if (crossesRiver(u, p)) return;
+    u.order = { kind: 'move', x: p.x, y: p.y, facing: Math.atan2(threat.y - u.y, threat.x - u.x) };
+    u.waypoints = [p];
+    u.group = 0;
+  }
+
+  /** A regiment out of ammunition with nothing to do walks back to its supply wagons to refill. */
+  private fetchAmmo(u: Unit) {
+    if (!this.smarts[u.side].ammo || u.ammo > 0 || u.order.kind !== 'hold' || u.holdPosition) return;
+    if (u.meleeWith !== null || u.underFire > 0 || isSupport(u) || UNIT_TYPES[u.type].range <= 0 || this.isSupplied(u)) return;
+    let wagons: Unit | undefined;
+    let wd = Infinity;
+    for (const w of this.units) {
+      if (w.side !== u.side || w.type !== 'supply' || w.state === 'routing') continue;
+      const d = dist(w, u);
+      if (d < wd) { wd = d; wagons = w; }
+    }
+    // Within reach of the wagons' carts it only has to wait.
+    if (!wagons || wd < RULES.supplyRange * 0.9) return;
+    const stop = RULES.supplyRange * 0.6;
+    const p = clampToMap({ x: wagons.x + ((u.x - wagons.x) / wd) * stop, y: wagons.y + ((u.y - wagons.y) / wd) * stop });
+    u.order = { kind: 'move', x: p.x, y: p.y };
+    u.waypoints = planRoute(u, p);
+    u.group = 0;
+  }
+
   /** Firepower left after fatigue, ammunition and experience. */
   private firepower(u: Unit): number {
     const ammo = u.ammo <= 0 ? 0 : u.ammo < RULES.lowAmmo ? 0.5 : 1;
@@ -928,6 +1049,8 @@ export class World {
     if (u.holdPosition || u.formation === 'fortified' || u.building > 0 || isSupport(u)) return;
     // Distant attackers (a battery shelling from across the field) are not worth a long charge into the open.
     if (dist(u, a) > Math.max(RULES.retaliateRange, UNIT_TYPES[u.type].range * 1.5)) return;
+    // Nor is leaving position for an attacker that is dug in, in cover, or stronger: stand and return fire instead.
+    if (this.smarts[u.side].bait && (formationOf(a) === 'fortified' || terrainAt(a).cover < 1 || this.strength(a) > this.strength(u) * 1.2)) return;
     u.order = { kind: 'attack', target: a.id, retaliate: true };
     u.waypoints = planRoute(u, a);
     u.group = 0;
@@ -978,7 +1101,8 @@ export class World {
       u.waypoints.shift();
       return;
     }
-    const desired = Math.atan2(goal.y - u.y, goal.x - u.x);
+    const aim = this.aroundShellfire(u, goal, enemies);
+    const desired = Math.atan2(aim.y - u.y, aim.x - u.x);
     const final = u.waypoints[u.waypoints.length - 1] ?? goal;
     // A short step to the rear is taken backwards, still facing the enemy, instead of turning around.
     const backstep = u.type !== 'cavalry' && u.type !== 'artillery' && dist(u, final) < 220
@@ -1085,15 +1209,29 @@ export class World {
 
     let best: Unit | undefined;
     let bestD = Infinity;
-    const candidates = ordered && dist(u, ordered) <= range ? [ordered] : enemies;
+    let bestScore = Infinity;
+    const forced = !!ordered && dist(u, ordered) <= range;
+    const candidates = forced ? [ordered!] : enemies;
+    const smart = this.smarts[u.side].target && !forced;
     for (const e of candidates) {
       if (!e.seen[u.side]) continue;
       const d = dist(u, e);
-      if (d > range || d >= bestD) continue;
+      if (d > range) continue;
+      // The nearest enemy, or with smart targeting the one closest to breaking among those in front: shaken
+      // and wavering regiments first, the last target while it is still a good one, nothing that means a long wheel.
+      let score = d / range;
+      if (smart) {
+        score -= 0.6 * (1 - Math.max(0, e.morale) / 100) + (e.state === 'wavering' ? 0.25 : 0) + (e.id === u.shotAt ? 0.15 : 0);
+        if (Math.abs(angleDiff(u.facing, Math.atan2(e.y - u.y, e.x - u.x))) > arc) score += 0.5;
+        if (e.state === 'routing') score += 0.5;
+      }
+      if (score >= bestScore) continue;
       best = e;
       bestD = d;
+      bestScore = score;
     }
     if (!best) return;
+    u.shotAt = best.id;
 
     const bearing = Math.atan2(best.y - u.y, best.x - u.x);
     if (Math.abs(angleDiff(u.facing, bearing)) > arc) {
