@@ -69,6 +69,26 @@ describe('battle simulation', () => {
     expect(Math.hypot(gun.fireZone!.x - gun.x, gun.fireZone!.y - gun.y)).toBeLessThanOrEqual(UNIT_TYPES.artillery.range);
   });
 
+  it('lets a twice-broken regiment rally only when the general reaches it', () => {
+    const w = new World(1);
+    w.apply({ kind: 'ready', side: 0 });
+    w.apply({ kind: 'ready', side: 1 });
+    w.step();
+    w.units = [];
+    const u = w.spawn(0, 'line', 1900, 120);
+    const g = w.spawn(0, 'general', 600, 2800);
+    w.spawn(1, 'line', 3500, 2800);
+    u.state = 'routing';
+    u.routs = 2;
+    u.morale = 5;
+    for (let i = 0; i < 200; i++) w.step();
+    expect(u.state).toBe('routing');
+    g.x = u.x + 200;
+    g.y = u.y + 200;
+    for (let i = 0; i < 150 && u.state === 'routing'; i++) w.step();
+    expect(u.state).not.toBe('routing');
+  });
+
   it('lets engineers build earthworks', () => {
     const w = new World(1);
     w.apply({ kind: 'ready', side: 0 });

@@ -1339,11 +1339,13 @@ export class World {
   private updateMorale(u: Unit, enemies: Unit[]) {
     // The general and staff do not run: they stand until they are cut down.
     if (u.type === 'general') { u.morale = 100; return; }
+    const commanded = this.inCommand(u);
     const nearbyRouting = this.units.some((o) => o.side === u.side && o !== u && o.state === 'routing' && dist(o, u) < 250);
-    if (nearbyRouting) u.morale -= 1.2 * DT * this.stats(u).moraleTaken;
-    if (u.underFire <= 0 && u.meleeWith === null) {
-      const boost = this.inCommand(u) ? RULES.commandMoraleRecovery : 1;
-      u.morale = Math.min(100, u.morale + RULES.moraleRecovery * boost * DT);
+    if (nearbyRouting) u.morale -= 1.2 * DT * this.stats(u).moraleTaken * (commanded ? RULES.commandMoraleTaken : 1);
+    if (u.meleeWith === null) {
+      // Out of the fight everyone steadies; under fire only the general's presence keeps men's nerve coming back.
+      const rate = u.underFire <= 0 ? (commanded ? RULES.commandMoraleRecovery : 1) : commanded ? RULES.commandUnderFireRecovery : 0;
+      u.morale = Math.min(100, u.morale + RULES.moraleRecovery * rate * DT);
     }
     if (u.morale <= 0) {
       u.morale = 0;
@@ -1360,7 +1362,7 @@ export class World {
       u.buildKind = null;
       u.fireZone = null;
       for (const e of enemies) if (e.meleeWith === u.id) e.meleeWith = null;
-      this.log(u.side, u.routs > 1 ? `${u.name} breaks for good` : `${u.name} is routing`);
+      this.log(u.side, u.routs > 1 ? `${u.name} breaks again: only the general can rally them now` : `${u.name} is routing`);
     } else {
       u.state = u.morale < RULES.waveringAt ? 'wavering' : 'ok';
     }
@@ -1368,13 +1370,13 @@ export class World {
 
   private updateRouting(u: Unit, enemies: Unit[]) {
     // Run for the nearest map edge that is not the enemy's side: home, or either flank.
-    // A first rout runs for the general instead, if the general is closer and out of danger.
+    // They run for the general instead if the general is closer, or within command range, and out of danger.
     const exits = [{ x: homeEdgeX(u.side), y: u.y }, { x: u.x, y: 0 }, { x: u.x, y: MAP.height }];
     let goal: Vec = exits.reduce((a, b) => (dist(u, b) < dist(u, a) ? b : a));
     const g = this.general(u.side);
     const safeGeneral = g && !enemies.some((e) => e.state !== 'routing' && dist(e, g) < RULES.rallySafeDistance);
     const nearGeneral = !!g && dist(u, g) <= RULES.commandRadius;
-    if (u.routs === 1 && g && safeGeneral && dist(u, g) < dist(u, goal)) {
+    if (g && safeGeneral && (nearGeneral || dist(u, g) < dist(u, goal))) {
       goal = dist(u, g) > 120 ? g : u;
     }
     const desired = Math.atan2(goal.y - u.y, goal.x - u.x);
@@ -1388,14 +1390,18 @@ export class World {
     u.x = next.x;
     u.y = next.y;
     u.moving = true;
-    const threat = enemies.some((e) => e.state !== 'routing' && dist(e, u) < RULES.rallySafeDistance);
+    // The general's presence lets men rally with the enemy closer than they otherwise would.
+    const safeFrom = nearGeneral ? RULES.rallySafeNearGeneral : RULES.rallySafeDistance;
+    const threat = enemies.some((e) => e.state !== 'routing' && dist(e, u) < safeFrom);
     const atEdge = u.edgeTime > 0;
     if (!threat) u.morale = Math.min(100, u.morale + 1.5 * (nearGeneral ? RULES.generalRallyBoost : atEdge ? RULES.edgeRallyBoost : 1) * DT);
-    if (u.routs === 1 && !threat && u.morale >= (nearGeneral ? RULES.rallyAtNearGeneral : RULES.rallyAt)) {
+    // A regiment that has broken twice only rallies to the general.
+    if ((u.routs === 1 || nearGeneral) && !threat && u.morale >= (nearGeneral ? RULES.rallyAtNearGeneral : RULES.rallyAt)) {
       u.state = 'wavering';
       u.order = { kind: 'hold' };
       u.facing = u.side === 0 ? 0 : Math.PI;
-      this.log(u.side, `${u.name} rallies`);
+      u.edgeTime = 0;
+      this.log(u.side, nearGeneral ? `${u.name} rallies to the general` : `${u.name} rallies`);
     }
   }
 

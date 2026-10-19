@@ -93,7 +93,7 @@ export const RULES = {
   finalPushAt: 10 * 60,
   callInCutoff: 12.5 * 60,
   timePressureAt: 7 * 60, // army morale starts to drain on both sides from here
-  timePressureRate: 6, // army morale per minute
+  timePressureRate: 8, // army morale per minute
   routingMorale: 4, // army morale lost for each regiment currently routing
   removedMorale: 3.5, // army morale lost for each regiment destroyed or deserted
   deploymentTime: 60,
@@ -118,8 +118,9 @@ export const RULES = {
   generalRallyBoost: 3, // and get their nerve back this many times faster
 
   commandRadius: 600, // regiments this close to the general have steadier morale
-  commandMoraleTaken: 0.85, // morale loss multiplier inside the command radius
+  commandMoraleTaken: 0.7, // morale loss multiplier inside the command radius
   commandMoraleRecovery: 1.5, // morale recovery multiplier inside the command radius
+  commandUnderFireRecovery: 0.5, // and even under fire there, morale still recovers at this share of the normal rate
   generalLossMorale: 15, // army morale lost for good when the general falls
   brigadeSize: 4, // regiments per infantry brigade
 
@@ -158,6 +159,7 @@ export const RULES = {
 
 
   rallySafeDistance: 450,
+  rallySafeNearGeneral: 250, // routed troops by the general rally with the enemy this close
   moraleRecovery: 0.6, // per second when not under pressure
   fortifyTime: 10, // digging in (only possible out of combat) takes this long before the bonuses apply
   artilleryFortifyTime: 5, // guns have to set up (fortify) before they can fire

@@ -551,7 +551,10 @@ export class BattleScene extends Phaser.Scene {
   /** The one thing most worth knowing about a regiment, shown under it. */
   private statusOf(u: Unit): { text: string; color: string } | null {
     const w = this.world;
-    if (u.state === 'routing') return { text: 'Routing', color: '#ff8a75' };
+    if (u.state === 'routing') {
+      if (w.inCommand(u)) return { text: 'Rallying to the general', color: '#a8e09a' };
+      return u.routs > 1 ? { text: 'Broken: send the general', color: '#ff8a75' } : { text: 'Routing', color: '#ff8a75' };
+    }
     if (w.time - u.flankedAt < 3 && !isSupport(u)) return { text: 'Flanked!', color: '#ff8a75' };
     const note = w.noteOf(u);
     if (note === 'bracing') return { text: 'Bracing', color: '#fffaf0' };
