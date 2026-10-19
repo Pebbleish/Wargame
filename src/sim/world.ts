@@ -55,6 +55,20 @@ export interface Unit {
   suppliedUntil: number; // battle time until which the last supply cart to reach this unit keeps it supplied
   cartAt: number; // supply wagons: battle time the next cart can leave
   shotAt: number | null; // the enemy it fired at last, which it keeps shooting while that still makes sense
+  flankedAt: number; // battle time it was last hit in the flank or rear
+  note: Note | null; // something it is doing on its own initiative, for the display
+  noteFor: Order | null; // the order the note belongs to: it lapses once the regiment gets another
+}
+
+export type Note = 'bracing' | 'fallingBack' | 'ammo';
+
+/** What drags a side's army morale down, in points. */
+export interface MoraleBreakdown {
+  losses: number;
+  routing: number;
+  removed: number;
+  objectives: number;
+  time: number;
 }
 
 /**
@@ -374,6 +388,9 @@ export class World {
       suppliedUntil: 0,
       cartAt: 0,
       shotAt: null,
+      flankedAt: -99,
+      note: null,
+      noteFor: null,
       brigade: opts.brigade ?? this.brigadeFor(side, type),
       fatigue: 0,
       ammo: 100,
@@ -805,7 +822,10 @@ export class World {
     }
     // Troops on the move halt and turn to face cavalry charging at them, rather than take it in the flank.
     const horse = this.chargingHorse(u, enemies);
+    if (u.note === 'bracing') u.note = null;
     if (horse) {
+      u.note = 'bracing';
+      u.noteFor = u.order;
       goal = null;
       u.marching = false;
       if (u.meleeWith === null) u.facing = this.turnToward(u, Math.atan2(horse.y - u.y, horse.x - u.x));
@@ -1002,6 +1022,8 @@ export class World {
     u.order = { kind: 'move', x: p.x, y: p.y, facing: Math.atan2(threat.y - u.y, threat.x - u.x) };
     u.waypoints = [p];
     u.group = 0;
+    u.note = 'fallingBack';
+    u.noteFor = u.order;
   }
 
   /** A regiment out of ammunition with nothing to do walks back to its supply wagons to refill. */
@@ -1022,6 +1044,8 @@ export class World {
     u.order = { kind: 'move', x: p.x, y: p.y };
     u.waypoints = planRoute(u, p);
     u.group = 0;
+    u.note = 'ammo';
+    u.noteFor = u.order;
   }
 
   /** Firepower left after fatigue, ammunition and experience. */
@@ -1194,6 +1218,7 @@ export class World {
     this.sides[target.side].lostMen += lost;
     if (from.side !== target.side) from.xp += (lost / target.maxMen) * RULES.xpPerKill;
     const flank = this.flankMultiplier(from, target);
+    if (flank > 1 && from.side !== target.side) target.flankedAt = this.time;
     const steadiness = EXPERIENCE[experienceOf(target)].morale * (this.inCommand(target) ? RULES.commandMoraleTaken : 1);
     target.morale = Math.max(0, target.morale - (lost / target.maxMen) * 100 * moraleWeight * flank * this.stats(target).moraleTaken * steadiness);
     target.underFire = 2;
@@ -1459,12 +1484,27 @@ export class World {
 
   private armyMorale() {
     for (const side of [0, 1] as Side[]) {
-      const s = this.sides[side];
-      const routing = this.units.filter((u) => u.side === side && u.state === 'routing').length;
-      const lossFrac = s.lostMen / Math.max(1, s.fieldedMen);
-      const timePressure = this.time > RULES.timePressureAt ? (RULES.timePressureRate * (this.time - RULES.timePressureAt)) / 60 : 0;
-      s.armyMorale = Math.max(0, 100 - 60 * lossFrac - RULES.routingMorale * routing - RULES.removedMorale * s.removed - s.objectiveDrain - timePressure);
+      const b = this.moraleBreakdown(side);
+      this.sides[side].armyMorale = Math.max(0, 100 - b.losses - b.routing - b.removed - b.objectives - b.time);
     }
+  }
+
+  /** Where a side's lost army morale has gone. */
+  moraleBreakdown(side: Side): MoraleBreakdown {
+    const s = this.sides[side];
+    const routing = this.units.filter((u) => u.side === side && u.state === 'routing').length;
+    return {
+      losses: 60 * s.lostMen / Math.max(1, s.fieldedMen),
+      routing: RULES.routingMorale * routing,
+      removed: RULES.removedMorale * s.removed,
+      objectives: s.objectiveDrain,
+      time: this.time > RULES.timePressureAt ? (RULES.timePressureRate * (this.time - RULES.timePressureAt)) / 60 : 0,
+    };
+  }
+
+  /** What a regiment is doing on its own, if anything, while it still has the order the note belongs to. */
+  noteOf(u: Unit): Note | null {
+    return u.note && u.noteFor === u.order ? u.note : null;
   }
 
   private checkEnd() {

@@ -2,7 +2,7 @@ import Phaser from 'phaser';
 import { MAP, RULES, UNIT_TYPES, UnitTypeId } from '../sim/config';
 import { AI } from '../sim/ai';
 import { HabitWatcher, mergeHabits, parseHabits } from '../sim/habits';
-import { CROSSINGS, EARTHWORKS, OBJECTIVES, Vec, dist } from '../sim/map';
+import { CROSSINGS, EARTHWORKS, OBJECTIVES, Vec, dist, planRoute, terrainAt } from '../sim/map';
 import { Side, Unit, World, experienceOf, formationOf, inZone, isSupport, unitRadius, unitSize } from '../sim/world';
 import { Hud } from './hud';
 import { paintTerrain } from './terrain';
@@ -27,7 +27,6 @@ interface Drag {
   screen: Vec;
   current: Vec;
   moved: boolean;
-  panning: boolean; // a plain left-drag moves the map; Shift+drag box-selects
 }
 
 export class BattleScene extends Phaser.Scene {
@@ -51,9 +50,14 @@ export class BattleScene extends Phaser.Scene {
   private keys: Record<string, boolean> = {};
   private pointerWorld: Vec = { x: 0, y: 0 };
   private overCanvas = true;
+  private pointerSeen = false; // the mouse has moved over the battlefield at least once, so its position means something
   private watcher: HabitWatcher | null = null; // notes how the player fights, for the AI's next battle
   private mapLayer: Phaser.GameObjects.GameObject[] = [];
   private aiming = false; // placing the fire circle for the selected batteries
+  private routePreview = { key: '', paths: [] as Vec[][] }; // routes shown while the right button is held
+  private labels: Phaser.GameObjects.Text[] = []; // status words under regiments, reused frame to frame
+  private alertedAt = new Map<string, number>(); // when each kind of alert was last raised, so they do not repeat
+  private lastOwners: (Side | -1)[] = [];
 
   constructor() {
     super('battle');
@@ -97,6 +101,12 @@ export class BattleScene extends Phaser.Scene {
       },
       pause: () => { this.paused = !this.paused; },
       speed: (d) => { this.speedIndex = Phaser.Math.Clamp(this.speedIndex + d, 0, SPEEDS.length - 1); },
+      jump: (at, id) => {
+        this.centerOn(at);
+        this.clampCamera();
+        const u = id !== undefined ? this.world.unit(id) : undefined;
+        if (u && u.side === PLAYER && u.state !== 'routing') this.selected = new Set([u.id]);
+      },
     });
 
     this.setupInput();
@@ -119,6 +129,8 @@ export class BattleScene extends Phaser.Scene {
     this.pan = null;
     this.acc = 0;
     this.paused = false;
+    this.alertedAt.clear();
+    this.lastOwners = [...this.world.owners];
   }
 
   /** Paint the battlefield generated for this battle, with its objective names. */
@@ -197,21 +209,21 @@ export class BattleScene extends Phaser.Scene {
 
     this.input.on('pointerdown', (p: Phaser.Input.Pointer) => {
       const w = { x: p.worldX, y: p.worldY };
-      if (p.button === 1) {
+      // The map moves with a middle-drag, or Alt+drag for trackpads; a plain left-drag draws a selection box.
+      if (p.button === 1 || (p.button === 0 && p.event.altKey)) {
         this.pan = { x: cam.scrollX, y: cam.scrollY, sx: p.x, sy: p.y };
         return;
       }
-      const panning = p.button === 0 && !p.event.shiftKey && !this.aiming && !this.pendingCallIn;
-      if (panning) this.pan = { x: cam.scrollX, y: cam.scrollY, sx: p.x, sy: p.y };
-      this.drag = { button: p.button, start: w, screen: { x: p.x, y: p.y }, current: w, moved: false, panning };
+      this.drag = { button: p.button, start: w, screen: { x: p.x, y: p.y }, current: w, moved: false };
     });
 
     this.input.on('gameover', () => { this.overCanvas = true; });
     this.input.on('gameout', () => { this.overCanvas = false; this.hud.showTooltip(null, 0, 0); });
 
     this.input.on('pointermove', (p: Phaser.Input.Pointer) => {
+      this.pointerSeen = true;
       this.pointerWorld = { x: p.worldX, y: p.worldY };
-      if (this.pan && (!this.drag?.panning || Math.hypot(p.x - this.pan.sx, p.y - this.pan.sy) > 8)) {
+      if (this.pan) {
         const d = screenToWorldDir((p.x - this.pan.sx) / cam.zoom, (p.y - this.pan.sy) / cam.zoom);
         cam.scrollX = this.pan.x - d.x;
         cam.scrollY = this.pan.y - d.y;
@@ -227,16 +239,15 @@ export class BattleScene extends Phaser.Scene {
 
     // Releasing over a HUD panel arrives as pointerupoutside; handle it the same way so drags never stick.
     const release = (p: Phaser.Input.Pointer) => {
-      if (p.button === 1) {
+      if (this.pan) {
         this.pan = null;
         return;
       }
       const d = this.drag;
       this.drag = null;
-      if (d?.panning) this.pan = null;
-      if (!d || (d.panning && d.moved)) return;
+      if (!d) return;
       const end = { x: p.worldX, y: p.worldY };
-      if (d.button === 0) this.leftRelease(d, end, p.event.shiftKey, p.event.ctrlKey || p.event.metaKey);
+      if (d.button === 0) this.leftRelease(d, end, p.event.shiftKey, p.event.shiftKey || p.event.ctrlKey || p.event.metaKey);
       if (d.button === 2) this.rightRelease(d, end);
     };
     this.input.on('pointerup', release);
@@ -346,7 +357,7 @@ export class BattleScene extends Phaser.Scene {
     const x1 = Math.max(d.start.x, end.x);
     const y0 = Math.min(d.start.y, end.y);
     const y1 = Math.max(d.start.y, end.y);
-    // A new box replaces the selection; hold Ctrl as well to add to it.
+    // A new box replaces the selection; hold Shift or Ctrl to add to it.
     if (!add) this.selected.clear();
     for (const u of this.world.units) {
       if (u.side === PLAYER && u.state !== 'routing' && u.x >= x0 && u.x <= x1 && u.y >= y0 && u.y <= y1) this.selected.add(u.id);
@@ -479,10 +490,14 @@ export class BattleScene extends Phaser.Scene {
     this.pointerWorld = { x: at.x, y: at.y };
     if (this.drag) this.drag.current = this.pointerWorld;
     this.draw();
+    const hint = this.orderHint();
+    this.hud.showHint(hint?.text ?? null, ptr.x, ptr.y, hint?.bad);
+    this.game.canvas.style.cursor = hint?.target ? 'crosshair' : 'default';
     this.hudTimer -= delta;
     if (this.hudTimer <= 0) {
       this.hudTimer = 100;
       if (this.overCanvas) this.hud.showTooltip(this.drag ? null : this.unitAt(this.pointerWorld) ?? null, ptr.x, ptr.y);
+      this.raiseAlerts();
       this.hud.update(this.world, {
         selected: this.selectedUnits(),
         pendingCallIn: this.pendingCallIn,
@@ -491,6 +506,86 @@ export class BattleScene extends Phaser.Scene {
         spectating: this.spectating,
       });
     }
+  }
+
+  /**
+   * Notices for the things a commander needs to know about, each clickable to look: a town under attack or lost,
+   * a regiment hit in the flank, routing or out of ammunition, enemy horse near the guns, wagons or general.
+   */
+  private raiseAlerts() {
+    const w = this.world;
+    // Starting regiments take their home towns in the first moments; that is not news.
+    if (this.spectating || w.phase !== 'battle' || w.time < 10) {
+      this.lastOwners = [...w.owners];
+      return;
+    }
+    const raise = (key: string, every: number, text: string, tone: 'bad' | 'good' | 'info', at: Vec, unitId?: number) => {
+      const last = this.alertedAt.get(key);
+      if (last !== undefined && w.time - last < every) return;
+      this.alertedAt.set(key, w.time);
+      this.hud.alert({ text, tone, at: { x: at.x, y: at.y }, unitId, t: w.time });
+    };
+    const foes = w.units.filter((e) => e.side !== PLAYER && e.seen[PLAYER] && e.state !== 'routing');
+    OBJECTIVES.forEach((o, i) => {
+      const was = this.lastOwners[i];
+      const now = w.owners[i];
+      if (was === PLAYER && now !== PLAYER) raise(`lost${i}`, 0, `${o.name} has been lost`, 'bad', o);
+      else if (was !== PLAYER && now === PLAYER) raise(`took${i}`, 0, `${o.name} taken`, 'good', o);
+      else if (now === PLAYER && foes.some((e) => !isSupport(e) && dist(e, o) < RULES.captureRadius + 250)) raise(`att${i}`, 45, `${o.name} is under attack`, 'bad', o);
+    });
+    this.lastOwners = [...w.owners];
+    for (const u of w.units) {
+      if (u.side !== PLAYER) continue;
+      if (u.state === 'routing') { raise(`rout${u.id}`, 60, `${u.name} is routing`, 'bad', u); continue; }
+      if (w.time - u.flankedAt < 0.5 && !isSupport(u)) raise(`flank${u.id}`, 30, `${u.name} is hit in the flank`, 'bad', u, u.id);
+      if (u.ammo <= 0 && UNIT_TYPES[u.type].range > 0) raise(`ammo${u.id}`, 90, `${u.name} is out of ammunition`, 'info', u, u.id);
+      if ((u.type === 'artillery' || isSupport(u)) && foes.some((e) => e.type === 'cavalry' && dist(e, u) < 450)) {
+        raise(`horse${u.id}`, 40, `Enemy cavalry near ${u.name}`, 'bad', u, u.id);
+      }
+    }
+  }
+
+  /** The one thing most worth knowing about a regiment, shown under it. */
+  private statusOf(u: Unit): { text: string; color: string } | null {
+    const w = this.world;
+    if (u.state === 'routing') return { text: 'Routing', color: '#ff8a75' };
+    if (w.time - u.flankedAt < 3 && !isSupport(u)) return { text: 'Flanked!', color: '#ff8a75' };
+    const note = w.noteOf(u);
+    if (note === 'bracing') return { text: 'Bracing', color: '#fffaf0' };
+    if (note === 'fallingBack') return { text: 'Falling back', color: '#ffc27a' };
+    if (note === 'ammo') return { text: 'To the wagons', color: '#9cc6ef' };
+    if (u.state === 'wavering') return { text: 'Wavering', color: '#ffc27a' };
+    if (u.ammo <= 0 && UNIT_TYPES[u.type].range > 0) return { text: 'Out of ammo', color: '#ff8a75' };
+    return null;
+  }
+
+  /** A few words by the pointer saying what a click will do with what is selected. */
+  private orderHint(): { text: string; bad?: boolean; target?: boolean } | null {
+    if (this.spectating || !this.overCanvas || !this.pointerSeen || this.drag?.button === 0 || this.world.phase === 'ended') return null;
+    const p = this.pointerWorld;
+    if (this.aiming) {
+      const ok = this.selectedGuns().some((u) => dist(u, p) <= UNIT_TYPES.artillery.range * (terrainAt(u).hill ? 1.2 : 1));
+      return { text: ok ? 'Click: shell here' : 'Click: guns move up to shell here', bad: !ok, target: true };
+    }
+    if (this.pendingCallIn) {
+      const ok = inZone(PLAYER, p);
+      return ok ? { text: `Click: call in ${UNIT_TYPES[this.pendingCallIn].label}` } : { text: 'Troops arrive in your shaded zone', bad: true };
+    }
+    const sel = this.selectedUnits();
+    if (!sel.length) return null;
+    if (this.drag?.button === 2) return { text: this.drag.moved ? 'Release: form a line here' : 'Release: move here' };
+    const hover = this.unitAt(p);
+    if (hover?.side === PLAYER) return null;
+    if (hover && this.world.phase === 'battle') {
+      const types = new Set(sel.map((u) => u.type));
+      const verbs: string[] = [];
+      if (types.has('line') || types.has('cavalry')) verbs.push('charge');
+      if (types.has('light') || types.has('engineers')) verbs.push('fire on');
+      if (types.has('artillery')) verbs.push('shell');
+      const say = verbs.length ? verbs.join(' / ') : 'attack';
+      return { text: say[0].toUpperCase() + say.slice(1), target: true };
+    }
+    return { text: 'Move' };
   }
 
   private panCamera(delta: number) {
@@ -502,6 +597,15 @@ export class BattleScene extends Phaser.Scene {
     if (this.keys['d'] || this.keys['arrowright']) sx += v;
     if (this.keys['w'] || this.keys['arrowup']) sy -= v;
     if (this.keys['s'] || this.keys['arrowdown']) sy += v;
+    // Pushing the mouse against the edge of the battlefield scrolls it, as in most strategy games.
+    const ptr = this.input.activePointer;
+    const edge = 12;
+    if (this.overCanvas && this.pointerSeen && document.hasFocus() && !this.pan) {
+      if (ptr.x < edge) sx -= v;
+      if (ptr.x > cam.width - edge) sx += v;
+      if (ptr.y < edge) sy -= v;
+      if (ptr.y > cam.height - edge) sy += v;
+    }
     if (!sx && !sy) return;
     const d = screenToWorldDir(sx, sy);
     cam.scrollX += d.x;
@@ -694,6 +798,25 @@ export class BattleScene extends Phaser.Scene {
       };
       this.drawUnit(g, view, now);
     }
+    // Status words under our regiments (all of them when watching), kept the same size on screen at any zoom.
+    let shown = 0;
+    const zoom = this.cameras.main.zoom;
+    const down = screenToWorldDir(0, 1);
+    for (const u of w.units) {
+      if (!this.canSee(u) || (u.side !== PLAYER && !this.spectating)) continue;
+      const status = this.statusOf(u);
+      if (!status) continue;
+      const label = this.labels[shown] ?? (this.labels[shown] = this.add.text(0, 0, '', {
+        fontFamily: 'Inter, system-ui, sans-serif', fontSize: '12px', fontStyle: 'bold', backgroundColor: 'rgba(29,27,22,0.75)', padding: { x: 4, y: 1 },
+      }).setOrigin(0.5, 0).setDepth(5).setRotation(-VIEW_ROTATION));
+      shown++;
+      const x = u.prev.x + (u.x - u.prev.x) * t;
+      const y = u.prev.y + (u.y - u.prev.y) * t;
+      const off = Math.max(unitSize(u).w, unitSize(u).d) / 2 + 6 / zoom;
+      if (label.text !== status.text) label.setText(status.text);
+      label.setColor(status.color).setScale(1 / zoom).setPosition(x + down.x * off, y + down.y * off).setVisible(true);
+    }
+    for (let i = shown; i < this.labels.length; i++) this.labels[i].setVisible(false);
 
     // Orders of the selected regiments, with an outline of where each one will stand.
     for (const u of this.selectedUnits()) {
@@ -716,17 +839,60 @@ export class BattleScene extends Phaser.Scene {
       }
     }
 
+    // What the selected regiments can shoot: line infantry fires to its front, skirmishers and guns all round.
+    const shooters = this.selectedUnits().filter((u) => (u.side === PLAYER || this.spectating) && UNIT_TYPES[u.type].range > 0);
+    if (shooters.length <= 8 && !this.aiming) {
+      for (const u of shooters) {
+        const r = UNIT_TYPES[u.type].range * (terrainAt(u).hill ? 1.2 : 1);
+        const col = u.type === 'artillery' ? 0xc0392b : 0xfffaf0;
+        if (u.type === 'line' || u.type === 'engineers') {
+          const arc = Math.PI / 2.6;
+          o.fillStyle(col, 0.08);
+          o.slice(u.x, u.y, r, u.facing - arc, u.facing + arc, false);
+          o.fillPath();
+          o.lineStyle(2, col, 0.35);
+          o.slice(u.x, u.y, r, u.facing - arc, u.facing + arc, false);
+          o.strokePath();
+        } else {
+          o.lineStyle(2, col, 0.3);
+          o.strokeCircle(u.x, u.y, r);
+        }
+      }
+    }
+
+    // The enemy under the pointer, with lines from each selected regiment: red if it is within reach, grey if not.
+    const hovered = this.unitAt(this.pointerWorld);
+    if (hovered && hovered.side !== PLAYER && !this.spectating && this.world.phase === 'battle') {
+      const sel = this.selectedUnits();
+      if (sel.length) {
+        o.lineStyle(5, 0xc0392b, 0.95);
+        o.strokePoints(this.corners(hovered), true);
+        for (const u of sel) {
+          const reach = UNIT_TYPES[u.type].range * (terrainAt(u).hill ? 1.2 : 1);
+          o.lineStyle(2, dist(u, hovered) <= reach ? 0xc0392b : 0x8a8170, 0.6);
+          o.lineBetween(u.x, u.y, hovered.x, hovered.y);
+        }
+      }
+    }
+
     // Drag feedback.
     const d = this.drag;
-    if (d && d.moved && d.button === 0 && !d.panning && !this.pendingCallIn) {
+    if (d && d.moved && d.button === 0 && !this.pendingCallIn && !this.aiming) {
       o.lineStyle(2, 0xfffaf0, 0.9);
       o.strokeRect(Math.min(d.start.x, d.current.x), Math.min(d.start.y, d.current.y), Math.abs(d.current.x - d.start.x), Math.abs(d.current.y - d.start.y));
     }
     // Holding the right button shows where a group will form up before it is let go.
     if (d && !d.moved && d.button === 2 && !this.pendingCallIn && !this.aiming && !this.unitAt(d.current)) {
       const sel = this.selectedUnits();
-      if (sel.length > 1) {
+      if (sel.length) {
         const { moves, facing } = this.formationAt(sel, d.current);
+        // The way each regiment will go, round the river by the nearest crossing where it has to.
+        const key = `${Math.round(d.current.x / 20)},${Math.round(d.current.y / 20)}:${sel.map((u) => u.id).join(',')}`;
+        if (this.routePreview.key !== key) {
+          this.routePreview = { key, paths: moves.slice(0, 12).map((m) => { const u = sel.find((s) => s.id === m.id)!; return [u, ...planRoute(u, m)]; }) };
+        }
+        o.lineStyle(3, 0xfffaf0, 0.45);
+        for (const path of this.routePreview.paths) for (let i = 0; i < path.length - 1; i++) o.lineBetween(path[i].x, path[i].y, path[i + 1].x, path[i + 1].y);
         for (const m of moves) {
           const u = sel.find((s) => s.id === m.id)!;
           this.blockOutline(o, { ...u, formation: u.formation === 'marching' ? 'formation' : u.formation, x: m.x, y: m.y, facing: facing ?? u.facing }, 0xfffaf0, 0.8);

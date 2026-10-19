@@ -1,4 +1,5 @@
 import { CALLIN_ORDER, Formation, RULES, UNIT_TYPES, UnitTypeId } from '../sim/config';
+import { OBJECTIVES, Vec } from '../sim/map';
 import { Unit, World, experienceOf, formationOf, isSupport } from '../sim/world';
 
 export interface HudHandlers {
@@ -15,6 +16,16 @@ export interface HudHandlers {
   build(): void;
   pause(): void;
   speed(delta: number): void;
+  jump(at: Vec, unitId?: number): void;
+}
+
+/** A short notice in the alert list; clicking it moves the view to where it happened. */
+export interface Alert {
+  text: string;
+  tone: 'bad' | 'good' | 'info';
+  at: Vec;
+  unitId?: number;
+  t: number; // battle time it was raised
 }
 
 export interface UiState {
@@ -66,6 +77,10 @@ export class Hud {
   private end: HTMLDivElement;
   private controls: HTMLDivElement;
   private help: HTMLDivElement;
+  private hint: HTMLDivElement;
+  private alertBox: HTMLDivElement;
+  private alerts: Alert[] = [];
+  private banner: HTMLDivElement;
   private endShown = false;
 
   constructor(root: HTMLElement, private h: HudHandlers) {
@@ -87,6 +102,17 @@ export class Hud {
     this.controls.id = 'controls';
     this.help = el('div', 'panel');
     this.help.id = 'help';
+    this.hint = el('div');
+    this.hint.id = 'hint';
+    this.alertBox = el('div');
+    this.alertBox.id = 'alerts';
+    this.alertBox.addEventListener('click', (e) => {
+      const i = Number(((e.target as HTMLElement).closest('[data-i]') as HTMLElement | null)?.dataset.i);
+      const a = this.alerts[i];
+      if (a) this.h.jump(a.at, a.unitId);
+    });
+    this.banner = el('div');
+    this.banner.id = 'banner';
 
     const bar = el('div', 'panel');
     bar.id = 'callins';
@@ -127,13 +153,14 @@ export class Hud {
     this.help.innerHTML = `
       <h3>How to play</h3>
       <p>Break the enemy army's morale, hold every objective for ${RULES.dominationHold}s, or lead on points when the ${RULES.matchLength / 60}-minute clock runs out.</p>
-      <p><kbd>Left-click</kbd> select · <kbd>drag</kbd> move the map · <kbd>Shift</kbd>+drag box select (<kbd>Ctrl</kbd>+<kbd>Shift</kbd> to add) · <kbd>Shift</kbd>+click add<br>
-      <kbd>Right-click</kbd> move, or attack an enemy<br>
+      <p><kbd>Left-click</kbd> select · <kbd>drag</kbd> box select · <kbd>Shift</kbd>+click or <kbd>Shift</kbd>+drag add to the selection · <kbd>Ctrl</kbd>+<kbd>A</kbd> select all<br>
+      <kbd>Right-click</kbd> move, or attack an enemy (the word by the pointer says what will happen) · hold the button to preview the route<br>
       <kbd>Right-drag</kbd> form a line along the drag<br>
       <kbd>F</kbd> cycle formation, or <kbd>1</kbd> march · <kbd>2</kbd> formation · <kbd>3</kbd> fortify · <kbd>H</kbd> hold<br>
       Artillery: <kbd>B</kbd> then click to place its fire circle (or right-click an enemy) · <kbd>X</kbd> cease fire<br>
       <kbd>Space</kbd> pause · <kbd>+</kbd>/<kbd>−</kbd> speed<br>
-      <kbd>WASD</kbd> or arrows pan · wheel zoom</p>
+      <kbd>WASD</kbd>, arrows, mouse at the screen edge, middle-drag or <kbd>Alt</kbd>+drag move the map · wheel zoom</p>
+      <p>Selected regiments show what they can shoot: a shaded arc for line infantry (it fires to its front), a ring for skirmishers and guns. Words under your regiments flag trouble (Flanked!, Wavering, Out of ammo). Alerts in the bottom-right corner take you there when clicked. The top bar shows what is costing each army its morale.</p>
       <p><b>Marching</b> is fastest but fights badly; troops march automatically on any move out of combat and form up when they arrive. <b>Formation</b> is the fighting stance. <b>Fortified</b> barely moves but takes less damage and loses morale more slowly. Digging in takes ${RULES.fortifyTime}s and is only possible out of combat; moving gives it up. Shells hit fortified troops harder.</p>
       <p>Your <b>general</b> (the block with the banner) leads from the field: regiments inside the ring around the general lose morale more slowly and recover faster. Losing the general costs ${RULES.generalLossMorale} army morale. Routed troops rally on their own once safe, and much sooner near the general. <kbd>Double-click</kbd> a regiment to select its whole brigade.</p>
       <p>Marching, charging and melee tire troops; resting restores them. Firing uses <b>ammunition</b>: below ${RULES.lowAmmo}% fire is halved, and at 0 they stop firing. <b>Supply wagons</b> (each army starts with two) send carts to troops within ${RULES.supplyRange}m; every regiment inside the wagons' green ring that needs it gets carts of its own, neediest first, and refills and recovers while the load lasts (green halo). Wagons only send carts while standing still. Carts can be shot up on the road. Depots you hold and your deployment zone also refill slowly. Regiments gain experience in battle (gold pips: veteran, elite); reinforcements arrive green.</p>
@@ -148,7 +175,17 @@ export class Hud {
 
     this.economy.innerHTML = `<span class="mp"></span><button data-a="req" title="+${RULES.requisitionAmount} manpower once, costs ${RULES.requisitionMoraleCost} army morale">Requisition</button><span class="cap" style="color:var(--muted)"></span>`;
     this.deploy.innerHTML = `<div class="h">Deploy your army</div><div style="margin:4px 0 8px;color:var(--muted)">Right-click to reposition regiments in your zone or around your two towns. Spend your budget on extra troops.</div><button data-a="ready">Start battle</button>`;
-    this.selection.innerHTML = `<div class="info"></div><div class="btns"><button data-a="hold">Hold (H)</button></div><div class="btns fm"><button data-a="fm-marching">March (1)</button><button data-a="fm-formation">Formation (2)</button><button data-a="fm-fortified">Fortify (3)</button></div><div class="btns guns"><button data-a="aim">Aim fire (B)</button><button data-a="cease">Cease fire (X)</button></div><div class="btns eng"><button data-a="build">Build works (E)</button></div>`;
+    const key = (k: string) => ` <kbd>${k}</kbd>`;
+    this.selection.innerHTML = `<div class="info"></div>
+      <div class="btns fm">
+        <button data-a="fm-marching" title="March column: fastest, but fights badly and takes more casualties. Troops march on their own for long moves.">March${key('1')}</button>
+        <button data-a="fm-formation" title="Line of battle: the fighting stance.">Formation${key('2')}</button>
+        <button data-a="fm-fortified" title="Dig in: barely moves, but takes less fire and loses morale more slowly. Takes ${RULES.fortifyTime}s, only out of combat. Shells hit dug-in troops harder.">Fortify${key('3')}</button>
+      </div>
+      <div class="btns"><button data-a="hold" title="Stop and hold this spot: they will not chase attackers, fall back or go for ammunition on their own.">Hold position${key('H')}</button></div>
+      <div class="btns guns"><button data-a="aim" title="Click the ground to shell a circle there. Guns set up first, and move up if it is out of range.">Aim fire${key('B')}</button><button data-a="cease" title="Stop shelling.">Cease fire${key('X')}</button></div>
+      <div class="btns eng"><button data-a="build" title="Build earthworks (cover like a village), or a pontoon bridge when standing at the river.">Build works${key('E')}</button></div>
+      <div class="tip">Right-click: move or attack · right-drag: form a line · double-click: whole brigade</div>`;
     this.economy.addEventListener('click', (e) => {
       if ((e.target as HTMLElement).dataset.a === 'req') this.h.requisition();
     });
@@ -156,7 +193,7 @@ export class Hud {
       if ((e.target as HTMLElement).dataset.a === 'ready') this.h.ready();
     });
     this.selection.addEventListener('click', (e) => {
-      const a = (e.target as HTMLElement).dataset.a;
+      const a = ((e.target as HTMLElement).closest('[data-a]') as HTMLElement | null)?.dataset.a;
       if (a === 'hold') this.h.hold();
       if (a?.startsWith('fm-')) this.h.formation(a.slice(3) as Formation);
       if (a === 'aim') this.h.aim();
@@ -167,7 +204,7 @@ export class Hud {
       if ((e.target as HTMLElement).dataset.a === 'again') this.h.restart();
     });
 
-    for (const e of [this.top, this.economy, this.captions, bar, this.selection, this.deploy, this.controls, this.help, this.tooltip, this.end]) root.appendChild(e);
+    for (const e of [this.top, this.economy, this.captions, bar, this.selection, this.deploy, this.controls, this.help, this.alertBox, this.banner, this.tooltip, this.hint, this.end]) root.appendChild(e);
   }
 
   update(world: World, ui: UiState) {
@@ -176,10 +213,24 @@ export class Hud {
     const mb = (v: number, c: string) => `<div class="bar"><div style="width:${Math.max(0, v)}%;background:${c}"></div></div>`;
     const clockText = world.phase === 'deploy' ? clock(world.deployLeft) : clock(RULES.matchLength - world.time);
     const sub = world.phase === 'deploy' ? 'deployment' : world.time >= RULES.finalPushAt ? 'final push · points ×2' : 'remaining';
+    const held = (side: number) => world.owners.filter((o) => o === side).length;
+    // What is draining the army's morale, biggest first, so it is clear what to fix.
+    const drain = (side: 0 | 1) => {
+      const b = world.moraleBreakdown(side);
+      const parts: [string, number][] = [['casualties', b.losses], ['units lost', b.removed], ['routing', b.routing], ['objectives', b.objectives], ['clock', b.time]];
+      return parts.filter(([, v]) => v >= 1).sort((a, b2) => b2[1] - a[1]).slice(0, 3).map(([k, v]) => `${k} −${v.toFixed(0)}`).join(' · ');
+    };
+    const armyLine = (side: 0 | 1) => {
+      const s = world.sides[side];
+      const d = drain(side);
+      return `Morale ${s.armyMorale.toFixed(0)} · objectives ${held(side)}/${OBJECTIVES.length}${d ? `<br><span title="What has cost this army morale">${d}</span>` : ''}`;
+    };
     setHtml(this.top, `
-      <div class="army"><div class="name serif"><span>${me.nation}</span><span>${me.score.toFixed(0)} pts</span></div>${mb(me.armyMorale, '#2b2e38')}<div style="font-size:11px;color:var(--muted)">Army morale ${me.armyMorale.toFixed(0)}</div></div>
+      <div class="army"><div class="name serif"><span>${me.nation}</span><span>${me.score.toFixed(0)} pts</span></div>${mb(me.armyMorale, '#2b2e38')}<div class="sub2">${armyLine(0)}</div></div>
       <div id="clock"><div class="time serif">${clockText}</div><div class="sub">${sub}${ui.paused ? ' · paused' : ''}</div></div>
-      <div class="army"><div class="name serif"><span>${them.nation}</span><span>${them.score.toFixed(0)} pts</span></div>${mb(them.armyMorale, '#d9a92b')}<div style="font-size:11px;color:var(--muted)">Army morale ${them.armyMorale.toFixed(0)}</div></div>`);
+      <div class="army"><div class="name serif"><span>${them.nation}</span><span>${them.score.toFixed(0)} pts</span></div>${mb(them.armyMorale, '#d9a92b')}<div class="sub2">${armyLine(1)}</div></div>`);
+    this.updateBanner(world, ui.spectating);
+    this.updateAlerts(world);
 
     const income = world.phase === 'deploy' ? 'deployment budget' : `+${world.incomePerMinute(PLAYER).toFixed(0)}/min`;
     setHtml(this.economy.querySelector('.mp') as HTMLElement, `<b>Manpower ${Math.floor(me.manpower)}</b> <span style="color:var(--muted)">${income}</span>`);
@@ -289,6 +340,53 @@ export class Hud {
     this.tooltip.style.top = `${y + 16 + h > window.innerHeight ? y - 16 - h : y + 16}px`;
   }
 
+  /** The few words by the pointer saying what a click will do. */
+  showHint(text: string | null, x: number, y: number, bad = false) {
+    if (!text) {
+      this.hint.style.display = 'none';
+      return;
+    }
+    this.hint.style.display = 'block';
+    if (this.hint.textContent !== text) this.hint.textContent = text;
+    this.hint.classList.toggle('bad', bad);
+    this.hint.style.left = `${x + 18}px`;
+    this.hint.style.top = `${y - 30}px`;
+  }
+
+  /** How the battle can be won or lost right now: someone holding every objective, or an army near breaking. */
+  private updateBanner(world: World, spectating: boolean) {
+    let text = '';
+    let tone = '';
+    if (world.phase === 'battle') {
+      for (const side of [0, 1] as const) {
+        if (world.domination[side] <= 0) continue;
+        const left = clock(RULES.dominationHold - world.domination[side]);
+        const mine = side === PLAYER && !spectating;
+        text = spectating ? `${world.sides[side].nation} holds every objective: wins in ${left}`
+          : mine ? `You hold every objective: victory in ${left}` : `The enemy holds every objective: defeat in ${left} unless you retake one`;
+        tone = mine || spectating ? 'good' : 'bad';
+      }
+      if (!text && !spectating && world.sides[PLAYER].armyMorale < 25) {
+        text = 'Your army is close to breaking: pull back shaken regiments and hold what you have';
+        tone = 'bad';
+      }
+    }
+    if (this.banner.textContent !== text) this.banner.textContent = text;
+    this.banner.className = tone;
+    this.banner.style.display = text ? 'block' : 'none';
+  }
+
+  /** Add a notice to the alert list (newest at the top). */
+  alert(a: Alert) {
+    this.alerts.unshift(a);
+    this.alerts.length = Math.min(this.alerts.length, 5);
+  }
+
+  private updateAlerts(world: World) {
+    this.alerts = this.alerts.filter((a) => world.time - a.t < 20 && a.t <= world.time);
+    setHtml(this.alertBox, this.alerts.map((a, i) => `<div class="alert ${a.tone}" data-i="${i}" title="Click to look">${a.text}</div>`).join(''));
+  }
+
   private updateCaptions(world: World) {
     const fresh = world.events.filter((e) => e.t > world.time - 6 && (e.side === -1 || e.side === PLAYER || /takes|fled|destroyed|breaks|requisitions/.test(e.text))).slice(-4);
     const key = fresh.map((e) => e.t + e.text).join('|');
@@ -315,6 +413,7 @@ export class Hud {
   }
 
   reset() {
+    this.alerts = [];
     this.endShown = false;
     this.end.style.display = 'none';
   }
