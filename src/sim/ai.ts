@@ -11,6 +11,8 @@ export class AI {
   private calls = 0;
   private slots = new Map<number, number>();
   private lastAim = new Map<number, number>();
+  private lastGoal = new Map<number, number>(); // objective each regiment was sent to last think
+  private fallingBack = new Set<number>(); // general and wagons pulling back from a threat
 
   constructor(private side: Side) {}
 
@@ -70,7 +72,8 @@ export class AI {
       let bestScore = Infinity;
       needs.forEach((n, i) => {
         if (n.need <= 0) return;
-        const score = dist(u, n.pos) - n.need * 150;
+        // Stick with the objective it was already given, so regiments do not flip between two.
+        const score = dist(u, n.pos) - n.need * 150 - (this.lastGoal.get(u.id) === i ? 200 : 0);
         if (score < bestScore) { bestScore = score; best = i; }
       });
       if (best === -1) {
@@ -81,6 +84,7 @@ export class AI {
       }
       needs[best].need -= 1;
       assigned.set(u.id, needs[best].pos);
+      this.lastGoal.set(u.id, best);
     }
 
     const helpers = this.assignHelpers(mine, visibleEnemies, assigned, spare);
@@ -95,9 +99,11 @@ export class AI {
         const anchor = this.frontAnchor(mine);
         const back = u.type === 'general' ? 450 : 550;
         const p = { x: anchor.x - this.dir() * back, y: anchor.y + (u.type === 'supply' ? this.dir() * 150 : 0) };
-        // Pull back when the enemy gets close.
-        const horse = visibleEnemies.some((e) => e.type === 'cavalry' && e.state !== 'routing' && dist(e, u) < 1000);
-        if (nd < 700 || horse) p.x = u.x - this.dir() * 400;
+        // Pull back when the enemy gets close, and only return once well clear, so it does not shuttle to and fro.
+        const horseWithin = (r: number) => visibleEnemies.some((e) => e.type === 'cavalry' && e.state !== 'routing' && dist(e, u) < r);
+        if (nd < 700 || horseWithin(1000)) this.fallingBack.add(u.id);
+        else if (nd > 900 && !horseWithin(1200)) this.fallingBack.delete(u.id);
+        if (this.fallingBack.has(u.id)) p.x = anchor.x - this.dir() * (back + 400);
         this.moveIfFar(cmds, u, clampToMap(p, RULES.borderWidth + 80), 200);
         continue;
       }
@@ -157,7 +163,7 @@ export class AI {
         if (u.order.kind !== 'attack') cmds.push({ kind: 'attack', side: this.side, ids: [u.id], target: nearest.id });
         continue;
       }
-      const enemyWeak = nearest && nd < 380 && (nearest.state !== 'ok' || (u.morale > 65 && nearest.morale < u.morale - 20));
+      const enemyWeak = nearest && nd < 380 && (nearest.state === 'wavering' || (u.morale > 65 && nearest.morale < u.morale - 20));
       if (u.type === 'line' && enemyWeak && nearest) {
         if (u.formation !== 'formation') cmds.push({ kind: 'formation', side: this.side, ids: [u.id], formation: 'formation' });
         if (u.order.kind !== 'attack') cmds.push({ kind: 'attack', side: this.side, ids: [u.id], target: nearest.id });
@@ -174,7 +180,8 @@ export class AI {
       // Dig in when holding an objective under threat, otherwise stay in formation and let long moves march.
       const atGoal = dist(u, goal) < 250;
       const cavThreat = visibleEnemies.some((e) => e.type === 'cavalry' && e.state === 'ok' && dist(e, u) < 300);
-      const wanted = atGoal && (nd < 700 || cavThreat) ? 'fortified' : 'formation';
+      // Troops already in a fight cannot start digging in, so only ask when the order will be accepted.
+      const wanted = atGoal && (nd < 700 || cavThreat) && (u.formation === 'fortified' || world.canFortify(u)) ? 'fortified' : 'formation';
       if (u.formation !== wanted) cmds.push({ kind: 'formation', side: this.side, ids: [u.id], formation: wanted });
       // Spread regiments around the objective, mirrored so both sides behave the same way.
       const n = this.slot(u.id);
@@ -300,12 +307,15 @@ export class AI {
   private reinforce(world: World): Command[] {
     const s = world.sides[this.side];
     const count = (t: UnitTypeId) => world.units.filter((u) => u.side === this.side && u.type === t).length;
-    let wanted: UnitTypeId = 'line';
-    if (count('supply') === 0) wanted = 'supply';
-    else if (this.calls % 4 === 3) wanted = 'artillery';
-    else if (count('cavalry') < 2) wanted = 'cavalry';
-    else if (this.calls % 5 === 1) wanted = 'light';
-    if (world.callInBlocker(this.side, wanted) || s.manpower < UNIT_TYPES[wanted].cost) return [];
+    const prefs: UnitTypeId[] = [];
+    if (count('supply') === 0) prefs.push('supply');
+    if (this.calls % 4 === 3) prefs.push('artillery');
+    if (count('cavalry') < 2) prefs.push('cavalry');
+    if (this.calls % 5 === 1) prefs.push('light');
+    prefs.push('line');
+    // Take the first type that can be called in; a capped or cooling type should not hold up the rest.
+    const wanted = prefs.find((t) => !world.callInBlocker(this.side, t));
+    if (!wanted || s.manpower < UNIT_TYPES[wanted].cost) return [];
     const needs = this.needs(world).sort((a, b) => b.need - a.need);
     this.calls += 1;
     const y = Math.max(100, Math.min(MAP.height - 100, needs[0].pos.y));

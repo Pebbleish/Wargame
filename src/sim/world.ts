@@ -855,7 +855,8 @@ export class World {
     this.carts = this.carts.filter((c) => {
       const w = this.unit(c.wagon);
       const t = this.unit(c.target);
-      if (!w || !t || t.state === 'routing') return false;
+      // A cart turns back if its regiment routs or moves well out of the wagons' ring.
+      if (!w || !t || t.state === 'routing' || dist(w, t) > RULES.supplyRange * 1.2) return false;
       for (const e of this.units) {
         if (e.side === c.side || e.state === 'routing' || isSupport(e)) continue;
         const reach = (e.type === 'cavalry' ? 60 : UNIT_TYPES[e.type].range) + unitRadius(e);
@@ -1063,13 +1064,13 @@ export class World {
 
   private damage(target: Unit, casualties: number, from: Unit, moraleWeight: number) {
     if (from.side !== target.side) target.lastAttacker = from.id;
-    const lost = Math.min(target.men, casualties);
+    const lost = Math.max(0, Math.min(target.men, casualties));
     target.men -= lost;
     this.sides[target.side].lostMen += lost;
     if (from.side !== target.side) from.xp += (lost / target.maxMen) * RULES.xpPerKill;
     const flank = this.flankMultiplier(from, target);
     const steadiness = EXPERIENCE[experienceOf(target)].morale * (this.inCommand(target) ? RULES.commandMoraleTaken : 1);
-    target.morale -= (lost / target.maxMen) * 100 * moraleWeight * flank * this.stats(target).moraleTaken * steadiness;
+    target.morale = Math.max(0, target.morale - (lost / target.maxMen) * 100 * moraleWeight * flank * this.stats(target).moraleTaken * steadiness);
     target.underFire = 2;
   }
 
@@ -1115,12 +1116,12 @@ export class World {
   private engage(u: Unit, e: Unit) {
     u.meleeWith = e.id;
     if (e.meleeWith === null && e.state !== 'routing') e.meleeWith = u.id;
-    if (u.type === 'cavalry' && !u.charged.includes(e.id)) {
+    if (u.type === 'cavalry' && e.state !== 'routing' && !u.charged.includes(e.id)) {
       u.charged.push(e.id);
       const flank = this.flankMultiplier(u, e);
       const vs = e.type === 'cavalry' ? 1 : this.stats(e).vsCavalry;
       const impact = (16 * flank) / vs;
-      e.morale -= impact;
+      e.morale = Math.max(0, e.morale - impact);
       this.damage(e, e.men * 0.025 * (flank / vs), u, 1);
       if (e.type !== 'cavalry' && formationOf(e) === 'fortified') this.damage(u, u.men * 0.08, e, 2);
     }
@@ -1128,7 +1129,7 @@ export class World {
 
   private meleePower(u: Unit, vs: Unit): number {
     const def = UNIT_TYPES[u.type];
-    let p = u.men * (u.morale / 100 + 0.3) * def.shock;
+    let p = u.men * (Math.max(0, u.morale) / 100 + 0.3) * def.shock;
     if (vs.type === 'cavalry' && u.type !== 'cavalry') p *= this.stats(u).vsCavalry;
     if (u.state === 'wavering') p *= 0.6;
     if (u.state === 'routing') p *= 0.1;
@@ -1151,6 +1152,8 @@ export class World {
       if (u.meleeWith === null) continue;
       const e = this.unit(u.meleeWith);
       if (!e || dist(u, e) > unitRadius(u) + unitRadius(e) + 40 || u.state === 'routing') {
+        // Cavalry that has pulled clear can charge the same enemy again.
+        if (e && u.charged.includes(e.id)) u.charged = u.charged.filter((id) => id !== e.id);
         u.meleeWith = null;
         continue;
       }
@@ -1161,7 +1164,7 @@ export class World {
     for (const u of this.units) {
       for (const e of foes.get(u.id) ?? []) {
         const split = foes.get(e.id)?.length ?? 1;
-        if (e.state !== 'routing') this.damage(u, (this.meleePower(e, u) / split) * 0.0035 * DT * this.rng.range(0.8, 1.2), e, 3);
+        if (e.state !== 'routing' && u.state !== 'routing') this.damage(u, (this.meleePower(e, u) / split) * 0.0035 * DT * this.rng.range(0.8, 1.2), e, 3);
         // Nobody fights back while running, so pursuit is where routs turn into heavy losses.
         else if (u.state !== 'routing') this.damage(e, (this.meleePower(u, e) / (foes.get(u.id)!.length)) * 0.006 * DT, u, 0);
       }
@@ -1185,6 +1188,13 @@ export class World {
       u.meleeWith = null;
       u.order = { kind: 'hold' };
       u.waypoints = [];
+      // A broken unit abandons its works, its dug-in position and any half-built bridge.
+      if (u.formation === 'fortified') u.formation = 'formation';
+      u.digIn = 0;
+      u.marching = false;
+      u.building = 0;
+      u.buildKind = null;
+      u.fireZone = null;
       for (const e of enemies) if (e.meleeWith === u.id) e.meleeWith = null;
       this.log(u.side, u.routs > 1 ? `${u.name} breaks for good` : `${u.name} is routing`);
     } else {
@@ -1216,7 +1226,7 @@ export class World {
     u.moving = true;
     const threat = enemies.some((e) => e.state !== 'routing' && dist(e, u) < RULES.rallySafeDistance);
     const atEdge = u.edgeTime > 0;
-    if (!threat) u.morale += 1.5 * (nearGeneral ? RULES.generalRallyBoost : atEdge ? RULES.edgeRallyBoost : 1) * DT;
+    if (!threat) u.morale = Math.min(100, u.morale + 1.5 * (nearGeneral ? RULES.generalRallyBoost : atEdge ? RULES.edgeRallyBoost : 1) * DT);
     if (u.routs === 1 && !threat && u.morale >= (nearGeneral ? RULES.rallyAtNearGeneral : RULES.rallyAt)) {
       u.state = 'wavering';
       u.order = { kind: 'hold' };
@@ -1232,9 +1242,10 @@ export class World {
         const b = this.units[j];
         if (a.side !== b.side || a.state === 'routing' || b.state === 'routing') continue;
         const d = dist(a, b);
-        if (d === 0 || d > 260) continue;
-        const nx = (b.x - a.x) / d;
-        const ny = (b.y - a.y) / d;
+        if (d > 260) continue;
+        // Two blocks on the very same spot (call-ins arriving together) split apart along a fixed axis.
+        const nx = d === 0 ? 1 : (b.x - a.x) / d;
+        const ny = d === 0 ? 0 : (b.y - a.y) / d;
         // How far each block reaches towards the other, so long lines keep their full width apart.
         const reach = (u: Unit) => {
           const { w, d: depth } = unitSize(u);

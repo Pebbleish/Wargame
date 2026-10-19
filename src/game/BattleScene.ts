@@ -49,6 +49,7 @@ export class BattleScene extends Phaser.Scene {
   private hudTimer = 0;
   private keys: Record<string, boolean> = {};
   private pointerWorld: Vec = { x: 0, y: 0 };
+  private overCanvas = true;
   private mapLayer: Phaser.GameObjects.GameObject[] = [];
   private aiming = false; // placing the fire circle for the selected batteries
 
@@ -109,6 +110,9 @@ export class BattleScene extends Phaser.Scene {
     this.ais = this.spectating ? [new AI(0), new AI(1)] : [new AI(1)];
     this.selected.clear();
     this.pendingCallIn = null;
+    this.aiming = false;
+    this.drag = null;
+    this.pan = null;
     this.acc = 0;
     this.paused = false;
   }
@@ -198,6 +202,9 @@ export class BattleScene extends Phaser.Scene {
       this.drag = { button: p.button, start: w, screen: { x: p.x, y: p.y }, current: w, moved: false, panning };
     });
 
+    this.input.on('gameover', () => { this.overCanvas = true; });
+    this.input.on('gameout', () => { this.overCanvas = false; this.hud.showTooltip(null, 0, 0); });
+
     this.input.on('pointermove', (p: Phaser.Input.Pointer) => {
       this.pointerWorld = { x: p.worldX, y: p.worldY };
       if (this.pan && (!this.drag?.panning || Math.hypot(p.x - this.pan.sx, p.y - this.pan.sy) > 8)) {
@@ -214,7 +221,8 @@ export class BattleScene extends Phaser.Scene {
       this.hud.showTooltip(this.drag ? null : hover ?? null, p.x, p.y);
     });
 
-    this.input.on('pointerup', (p: Phaser.Input.Pointer) => {
+    // Releasing over a HUD panel arrives as pointerupoutside; handle it the same way so drags never stick.
+    const release = (p: Phaser.Input.Pointer) => {
       if (p.button === 1) {
         this.pan = null;
         return;
@@ -226,7 +234,9 @@ export class BattleScene extends Phaser.Scene {
       const end = { x: p.worldX, y: p.worldY };
       if (d.button === 0) this.leftRelease(d, end, p.event.shiftKey, p.event.ctrlKey || p.event.metaKey);
       if (d.button === 2) this.rightRelease(d, end);
-    });
+    };
+    this.input.on('pointerup', release);
+    this.input.on('pointerupoutside', release);
 
     this.input.on('wheel', (p: Phaser.Input.Pointer, _over: unknown, _dx: number, dy: number) => {
       // Zoom toward the pointer: the ground under it stays under it.
@@ -240,9 +250,13 @@ export class BattleScene extends Phaser.Scene {
     });
 
     window.addEventListener('keydown', (e) => {
-      this.keys[e.key.toLowerCase()] = true;
       const k = e.key.toLowerCase();
-      if (k === ' ') { this.paused = !this.paused; e.preventDefault(); }
+      if (k === ' ') e.preventDefault();
+      // Holding a key, or a browser shortcut like Ctrl + / Ctrl -, should not repeat or trigger game hotkeys.
+      if (e.repeat) return;
+      if ((e.ctrlKey || e.metaKey) && k !== 'a') return;
+      if (!e.ctrlKey && !e.metaKey) this.keys[k] = true;
+      if (k === ' ') this.paused = !this.paused;
       if (k === 'h') this.world.apply({ kind: 'hold', side: PLAYER, ids: [...this.selected] });
       if (k === 'f') this.world.apply({ kind: 'formation', side: PLAYER, ids: [...this.selected] });
       const fm = ({ '1': 'marching', '2': 'formation', '3': 'fortified' } as const)[k as '1' | '2' | '3'];
@@ -254,12 +268,13 @@ export class BattleScene extends Phaser.Scene {
       if (k === '-' || k === '_') this.speedIndex = Math.max(0, this.speedIndex - 1);
       if (k === 'escape') { this.pendingCallIn = null; this.aiming = false; this.selected.clear(); }
       if (k === 'a' && (e.ctrlKey || e.metaKey) && !this.spectating) {
+        this.keys.a = false;
         e.preventDefault();
         this.selected = new Set(this.world.units.filter((u) => u.side === PLAYER && u.state !== 'routing').map((u) => u.id));
       }
     });
     window.addEventListener('keyup', (e) => { this.keys[e.key.toLowerCase()] = false; });
-    window.addEventListener('blur', () => { this.keys = {}; });
+    window.addEventListener('blur', () => { this.keys = {}; this.drag = null; this.pan = null; });
   }
 
   private unitAt(p: Vec): Unit | undefined {
@@ -448,10 +463,16 @@ export class BattleScene extends Phaser.Scene {
       const u = this.world.unit(id);
       if (!u || u.state === 'routing') this.selected.delete(id);
     }
+    // Keep the pointer's ground position current while the camera pans or zooms under a still mouse.
+    const ptr = this.input.activePointer;
+    const at = ptr.positionToCamera(this.cameras.main) as Phaser.Math.Vector2;
+    this.pointerWorld = { x: at.x, y: at.y };
+    if (this.drag) this.drag.current = this.pointerWorld;
     this.draw();
     this.hudTimer -= delta;
     if (this.hudTimer <= 0) {
       this.hudTimer = 100;
+      if (this.overCanvas) this.hud.showTooltip(this.drag ? null : this.unitAt(this.pointerWorld) ?? null, ptr.x, ptr.y);
       this.hud.update(this.world, {
         selected: this.selectedUnits(),
         pendingCallIn: this.pendingCallIn,
@@ -677,7 +698,7 @@ export class BattleScene extends Phaser.Scene {
         this.arrowHead(o, prev, last, 0xfffaf0);
       } else if (u.order.kind === 'attack') {
         const t = w.unit(u.order.target);
-        if (t) {
+        if (t && this.canSee(t)) {
           o.lineStyle(4, 0xc0392b, 0.85);
           o.lineBetween(u.x, u.y, t.x, t.y);
           this.arrowHead(o, u, t, 0xc0392b);

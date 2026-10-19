@@ -280,9 +280,12 @@ export class Hud {
       return;
     }
     this.tooltip.style.display = 'block';
-    this.tooltip.style.left = `${x + 16}px`;
-    this.tooltip.style.top = `${y + 16}px`;
     setHtml(this.tooltip, `<div class="n">${u.name}</div>${this.unitRows(u)}`);
+    // Keep it on screen: flip to the other side of the cursor near the right and bottom edges.
+    const w = this.tooltip.offsetWidth;
+    const h = this.tooltip.offsetHeight;
+    this.tooltip.style.left = `${x + 16 + w > window.innerWidth ? x - 16 - w : x + 16}px`;
+    this.tooltip.style.top = `${y + 16 + h > window.innerHeight ? y - 16 - h : y + 16}px`;
   }
 
   private updateCaptions(world: World) {
