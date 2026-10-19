@@ -57,6 +57,7 @@ export class BattleScene extends Phaser.Scene {
   private aiming = false; // placing the fire circle for the selected batteries
   private routePreview = { key: '', paths: [] as Vec[][] }; // routes shown while the right button is held
   private labels: Phaser.GameObjects.Text[] = []; // status words under regiments, reused frame to frame
+  private showLabels = loadLabelsPref(); // the player can turn those words off
   private alertedAt = new Map<string, number>(); // when each kind of alert was last raised, so they do not repeat
   private lastOwners: (Side | -1)[] = [];
 
@@ -102,6 +103,7 @@ export class BattleScene extends Phaser.Scene {
       },
       pause: () => { this.paused = !this.paused; },
       speed: (d) => { this.speedIndex = Phaser.Math.Clamp(this.speedIndex + d, 0, SPEEDS.length - 1); },
+      labels: () => this.toggleLabels(),
       jump: (at, id) => {
         this.centerOn(at);
         this.clampCamera();
@@ -276,6 +278,7 @@ export class BattleScene extends Phaser.Scene {
       if (!e.ctrlKey && !e.metaKey) this.keys[k] = true;
       if (k === ' ') this.paused = !this.paused;
       if (k === 'h') this.world.apply({ kind: 'hold', side: PLAYER, ids: [...this.selected] });
+      if (k === 'l') this.toggleLabels();
       if (k === 'f') this.world.apply({ kind: 'formation', side: PLAYER, ids: [...this.selected] });
       const fm = ({ '1': 'marching', '2': 'formation', '3': 'fortified' } as const)[k as '1' | '2' | '3'];
       if (fm) this.world.apply({ kind: 'formation', side: PLAYER, ids: [...this.selected], formation: fm });
@@ -507,6 +510,7 @@ export class BattleScene extends Phaser.Scene {
         paused: this.paused,
         speed: SPEEDS[this.speedIndex],
         spectating: this.spectating,
+        labels: this.showLabels,
       });
     }
   }
@@ -545,6 +549,15 @@ export class BattleScene extends Phaser.Scene {
       if ((u.type === 'artillery' || isSupport(u)) && foes.some((e) => e.type === 'cavalry' && dist(e, u) < 450)) {
         raise(`horse${u.id}`, 40, `Enemy cavalry near ${u.name}`, 'bad', u, u.id);
       }
+    }
+  }
+
+  private toggleLabels() {
+    this.showLabels = !this.showLabels;
+    try {
+      localStorage.setItem(LABELS_KEY, this.showLabels ? '1' : '0');
+    } catch {
+      // Storage blocked: the choice lasts for this visit only.
     }
   }
 
@@ -799,7 +812,7 @@ export class BattleScene extends Phaser.Scene {
     let shown = 0;
     const zoom = this.cameras.main.zoom;
     const down = screenToWorldDir(0, 1);
-    for (const u of w.units) {
+    for (const u of this.showLabels ? w.units : []) {
       if (!this.canSee(u) || (u.side !== PLAYER && !this.spectating)) continue;
       const status = this.statusOf(u);
       if (!status) continue;
@@ -1085,6 +1098,15 @@ export class BattleScene extends Phaser.Scene {
 }
 
 const HABITS_KEY = 'wargame.habits';
+const LABELS_KEY = 'wargame.labels';
+
+function loadLabelsPref(): boolean {
+  try {
+    return localStorage.getItem(LABELS_KEY) !== '0';
+  } catch {
+    return true;
+  }
+}
 
 function loadHabits() {
   try {

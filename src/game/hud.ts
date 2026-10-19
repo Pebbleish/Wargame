@@ -17,6 +17,7 @@ export interface HudHandlers {
   pause(): void;
   speed(delta: number): void;
   jump(at: Vec, unitId?: number): void;
+  labels(): void;
 }
 
 /** A short notice in the alert list; clicking it moves the view to where it happened. */
@@ -33,6 +34,7 @@ export interface UiState {
   pendingCallIn: UnitTypeId | null;
   paused: boolean;
   speed: number;
+  labels: boolean;
   spectating: boolean;
 }
 
@@ -129,13 +131,14 @@ export class Hud {
     this.queue.id = 'queue';
     bar.appendChild(this.queue);
 
-    this.controls.innerHTML = `<button data-a="pause">Pause</button><button data-a="slower">−</button><span class="spd" style="align-self:center;min-width:28px;text-align:center">1×</span><button data-a="faster">+</button><button data-a="help">?</button><button data-a="spectate" title="Watch two AI armies fight">Watch AI</button><button data-a="resign">Resign</button>`;
+    this.controls.innerHTML = `<button data-a="pause">Pause</button><button data-a="slower">−</button><span class="spd" style="align-self:center;min-width:28px;text-align:center">1×</span><button data-a="faster">+</button><button data-a="labels" title="Show or hide the words under regiments: Routing, Wavering, Flanked! and so on (L)">Labels</button><button data-a="help">?</button><button data-a="spectate" title="Watch two AI armies fight">Watch AI</button><button data-a="resign">Resign</button>`;
     this.controls.addEventListener('click', (e) => {
       const a = (e.target as HTMLElement).dataset.a;
       if (a === 'pause') this.h.pause();
       if (a === 'slower') this.h.speed(-1);
       if (a === 'faster') this.h.speed(1);
       if (a === 'spectate') this.h.spectate();
+      if (a === 'labels') this.h.labels();
       if (a === 'help') this.help.style.display = this.help.style.display === 'none' ? 'block' : 'none';
       if (a === 'resign') {
         // Two clicks to resign, so a stray click never ends the battle.
@@ -163,6 +166,7 @@ export class Hud {
         <tr><td>${k('B')} ${k('X')}</td><td>Guns: aim, cease fire</td></tr>
         <tr><td>Drag, ${k('WASD')}</td><td>Move the map; wheel zooms</td></tr>
         <tr><td>${k('Space')} ${k('+')} ${k('−')}</td><td>Pause, speed</td></tr>
+        <tr><td>${k('L')}</td><td>Show or hide regiment labels</td></tr>
       </table>
       <ul class="tips">
         <li>Keep regiments in the <b>general's ring</b>, and send the general to <b>routed troops</b> to rally them.</li>
@@ -277,6 +281,7 @@ export class Hud {
     const controlsSpd = this.controls.querySelector('.spd') as HTMLElement;
     controlsSpd.textContent = `${ui.speed}×`;
     (this.controls.querySelector('[data-a="pause"]') as HTMLElement).textContent = ui.paused ? 'Resume' : 'Pause';
+    this.controls.querySelector('[data-a="labels"]')!.classList.toggle('on', ui.labels);
 
     this.updateSelection(ui.selected);
     this.updateCaptions(world);
