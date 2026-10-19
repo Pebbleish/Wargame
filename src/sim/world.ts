@@ -69,6 +69,7 @@ export interface MoraleBreakdown {
   removed: number;
   objectives: number;
   time: number;
+  regained: number; // morale won back: objectives retaken from the enemy, and regiments rallied
 }
 
 /**
@@ -125,6 +126,7 @@ export interface SideState {
   queue: CallIn[];
   requisitionUsed: boolean;
   objectiveDrain: number;
+  regained: number;
   lostMen: number;
   fieldedMen: number;
   removed: number;
@@ -232,6 +234,7 @@ function newSide(nation: string): SideState {
     queue: [],
     requisitionUsed: false,
     objectiveDrain: 0,
+    regained: 0,
     lostMen: 0,
     fieldedMen: 0,
     removed: 0,
@@ -344,6 +347,11 @@ export class World {
   /** The army commander, while alive. */
   general(side: Side): Unit | undefined {
     return this.units.find((u) => u.side === side && u.type === 'general');
+  }
+
+  /** A side well behind on army morale fights with its back to the wall. */
+  behind(side: Side): boolean {
+    return this.phase === 'battle' && this.sides[side].armyMorale <= this.sides[1 - side].armyMorale - RULES.desperateGap;
   }
 
   /** Regiments inside the general's command radius hold their nerve better. */
@@ -731,23 +739,21 @@ export class World {
   private economy() {
     for (const side of [0, 1] as Side[]) {
       const s = this.sides[side];
-      const other = this.sides[1 - side];
       let perMinute = RULES.baseIncome;
       OBJECTIVES.forEach((o, i) => {
         if (this.owners[i] === side) perMinute += o.kind === 'depot' ? RULES.depotIncome : RULES.objectiveIncome;
       });
-      if (s.armyMorale <= other.armyMorale - RULES.catchUpGap) perMinute *= 1 + RULES.catchUpBonus;
+      if (this.behind(side)) perMinute *= 1 + RULES.catchUpBonus;
       s.manpower = Math.min(RULES.stockpileCap, s.manpower + (perMinute / 60) * DT);
     }
   }
 
   incomePerMinute(side: Side): number {
-    const s = this.sides[side];
     let perMinute = RULES.baseIncome;
     OBJECTIVES.forEach((o, i) => {
       if (this.owners[i] === side) perMinute += o.kind === 'depot' ? RULES.depotIncome : RULES.objectiveIncome;
     });
-    if (s.armyMorale <= this.sides[1 - side].armyMorale - RULES.catchUpGap) perMinute *= 1 + RULES.catchUpBonus;
+    if (this.behind(side)) perMinute *= 1 + RULES.catchUpBonus;
     return perMinute;
   }
 
@@ -1244,7 +1250,9 @@ export class World {
     const flank = this.flankMultiplier(from, target);
     if (flank > 1 && from.side !== target.side) target.flankedAt = this.time;
     const steadiness = EXPERIENCE[experienceOf(target)].morale * (this.inCommand(target) ? RULES.commandMoraleTaken : 1);
-    target.morale = Math.max(0, target.morale - (lost / target.maxMen) * 100 * moraleWeight * flank * this.stats(target).moraleTaken * steadiness);
+    // An army fighting with its back to the wall holds on harder.
+    const desperate = this.behind(target.side) ? RULES.desperateMoraleTaken : 1;
+    target.morale = Math.max(0, target.morale - (lost / target.maxMen) * 100 * moraleWeight * flank * this.stats(target).moraleTaken * steadiness * desperate);
     target.underFire = 2;
   }
 
@@ -1428,6 +1436,7 @@ export class World {
       u.facing = u.side === 0 ? 0 : Math.PI;
       u.edgeTime = 0;
       this.log(u.side, nearGeneral ? `${u.name} rallies to the general` : `${u.name} rallies`);
+      this.sides[u.side].regained += RULES.rallyArmyMorale;
     }
   }
 
@@ -1501,7 +1510,11 @@ export class World {
       }
       if (present[0] !== present[1]) {
         const side: Side = present[0] ? 0 : 1;
-        if (this.owners[i] !== side) this.log(side, `${this.sides[side].nation} takes ${o.name}`);
+        if (this.owners[i] !== side) {
+          this.log(side, `${this.sides[side].nation} takes ${o.name}`);
+          // Taking a place back from the enemy lifts the whole army.
+          if (this.owners[i] === 1 - side) this.sides[side].regained += RULES.recaptureMorale;
+        }
         this.owners[i] = side;
       }
       const owner = this.owners[i];
@@ -1517,7 +1530,7 @@ export class World {
   private armyMorale() {
     for (const side of [0, 1] as Side[]) {
       const b = this.moraleBreakdown(side);
-      this.sides[side].armyMorale = Math.max(0, 100 - b.losses - b.routing - b.removed - b.objectives - b.time);
+      this.sides[side].armyMorale = Math.max(0, Math.min(100, 100 - b.losses - b.routing - b.removed - b.objectives - b.time + b.regained));
     }
   }
 
@@ -1531,6 +1544,7 @@ export class World {
       removed: RULES.removedMorale * s.removed,
       objectives: s.objectiveDrain,
       time: this.time > RULES.timePressureAt ? (RULES.timePressureRate * (this.time - RULES.timePressureAt)) / 60 : 0,
+      regained: s.regained,
     };
   }
 

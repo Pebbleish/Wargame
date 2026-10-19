@@ -172,7 +172,7 @@ export class Hud {
       <details><summary>Formations</summary>
         <p><b>March</b> is fastest but fights badly (used automatically out of combat). <b>Formation</b> is the fighting stance. <b>Fortified</b> barely moves but takes less damage and morale loss; it takes ${RULES.fortifyTime}s, only out of combat. Shells hit fortified troops harder.</p></details>
       <details><summary>Morale and the general</summary>
-        <p>Inside the general's ring, morale loss is cut by a third and keeps recovering even under fire. Routed troops run to the general if it is safe, and rally once clear of the enemy, much sooner near the general. Troops that break twice rally only to the general. Losing the general costs ${RULES.generalLossMorale} army morale. The top bar shows what is draining each army.</p></details>
+        <p>Inside the general's ring, morale loss is cut by a third and keeps recovering even under fire. Routed troops run to the general if it is safe, and rally once clear of the enemy, much sooner near the general. Troops that break twice rally only to the general. Losing the general costs ${RULES.generalLossMorale} army morale. The top bar shows what is draining each army.</p><p>Morale can be won back: +${RULES.recaptureMorale} for retaking an objective from the enemy, +${RULES.rallyArmyMorale} for each regiment that rallies. An army ${RULES.desperateGap} or more behind fights with its back to the wall: its regiments lose morale ${Math.round((1 - RULES.desperateMoraleTaken) * 100)}% slower and it gets ${Math.round(RULES.catchUpBonus * 100)}% more manpower.</p></details>
       <details><summary>Supply, fatigue and reinforcements</summary>
         <p>Below ${RULES.lowAmmo}% ammunition fire is halved; at 0 it stops. Standing wagons send carts to regiments within ${RULES.supplyRange}m (green ring), which can be shot up on the way. Held depots and your deployment zone refill slowly. Marching, charging and melee tire troops; rest restores them. Call in troops from the bar on the left, then click in your deployment zone; they arrive green and gain experience in battle (gold pips).</p></details>
       <details><summary>Guns, engineers and terrain</summary>
@@ -229,12 +229,15 @@ export class Hud {
     const drain = (side: 0 | 1) => {
       const b = world.moraleBreakdown(side);
       const parts: [string, number][] = [['casualties', b.losses], ['units lost', b.removed], ['routing', b.routing], ['objectives', b.objectives], ['clock', b.time]];
-      return parts.filter(([, v]) => v >= 1).sort((a, b2) => b2[1] - a[1]).slice(0, 3).map(([k, v]) => `${k} −${v.toFixed(0)}`).join(' · ');
+      const lost = parts.filter(([, v]) => v >= 1).sort((a, b2) => b2[1] - a[1]).slice(0, 3).map(([k, v]) => `${k} −${v.toFixed(0)}`);
+      if (b.regained >= 1) lost.push(`won back +${b.regained.toFixed(0)}`);
+      return lost.join(' · ');
     };
     const armyLine = (side: 0 | 1) => {
       const s = world.sides[side];
       const d = drain(side);
-      return `Morale ${s.armyMorale.toFixed(0)} · objectives ${held(side)}/${OBJECTIVES.length}${d ? `<br><span title="What has cost this army morale">${d}</span>` : ''}`;
+      const wall = world.behind(side) ? ' · <b title="Well behind: regiments steadier, more manpower">back to the wall</b>' : '';
+      return `Morale ${s.armyMorale.toFixed(0)}${wall} · objectives ${held(side)}/${OBJECTIVES.length}${d ? `<br><span title="What has cost this army morale">${d}</span>` : ''}`;
     };
     setHtml(this.top, `
       <div class="army"><div class="name serif"><span>${me.nation}</span><span>${me.score.toFixed(0)} pts</span></div>${mb(me.armyMorale, '#2b2e38')}<div class="sub2">${armyLine(0)}</div></div>

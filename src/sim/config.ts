@@ -93,7 +93,7 @@ export const RULES = {
   finalPushAt: 10 * 60,
   callInCutoff: 12.5 * 60,
   timePressureAt: 7 * 60, // army morale starts to drain on both sides from here
-  timePressureRate: 8, // army morale per minute
+  timePressureRate: 12, // army morale per minute
   routingMorale: 4, // army morale lost for each regiment currently routing
   removedMorale: 3.5, // army morale lost for each regiment destroyed or deserted
   deploymentTime: 60,
@@ -106,8 +106,11 @@ export const RULES = {
   depotIncome: 40,
   requisitionAmount: 300,
   requisitionMoraleCost: 10,
-  catchUpGap: 25,
-  catchUpBonus: 0.15,
+  desperateGap: 12, // a side this far behind on army morale gets the catch-up help below
+  catchUpBonus: 0.5, // extra manpower income
+  desperateMoraleTaken: 0.7, // and its regiments lose morale at this rate
+  recaptureMorale: 5, // army morale won back for taking an objective from the enemy
+  rallyArmyMorale: 1, // and for each regiment that rallies
   fieldCap: 24,
   queueLimit: 3,
   arrivalWarning: 20,
