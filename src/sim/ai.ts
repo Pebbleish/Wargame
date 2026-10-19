@@ -1,5 +1,6 @@
 import { MAP, RULES, UNIT_TYPES, UnitTypeId } from './config';
-import { OBJECTIVES, Vec, clampToMap, dist } from './map';
+import { OBJECTIVES, Terrain, Vec, clampToMap, dist, terrainAt } from './map';
+import { Habits } from './habits';
 import { Command, Side, Unit, World, angleDiff, formationOf, isSupport } from './world';
 
 type Posture = 'attack' | 'hold' | 'defend';
@@ -71,6 +72,100 @@ export const DOCTRINES: Doctrine[] = [
 ];
 
 /**
+ * The AI's tunable numbers. Tests and self-play tuning can hand an AI its own copy; the game uses these.
+ */
+export const PARAMS = {
+  ground: 0, // weight on cover and high ground when garrisons pick where to stand (0 ignores the ground)
+  gunGround: 1, // batteries look for high ground to fire from
+  coverFire: 0, // skirmishers and regiments going to help fire from woods and towns where they can
+  dodgeShells: 1, // troops with no enemy foot near step out of open ground under shellfire
+  adapt: 1, // changes battle plan mid-battle to counter what the enemy is doing (0 never does)
+  remember: 1, // how strongly a player's habits from earlier battles sway the choice of plan
+  restAt: 40, // worn regiments pull back to rest below this morale
+  restedAt: 75, // and come back above this
+  stickTo: 200, // pull (in metres) of the objective a regiment was already sent to
+  needPull: 150, // pull for each regiment an objective still needs
+  hqBack: 450, // how far behind the line the general rides
+  wagonsBack: 550, // and the wagons
+  shyOf: 700, // the general and wagons fall back when enemy troops come this close
+  raidReach: 1400, // how far raiding cavalry goes after guns, wagons and the general
+  cavReach: 800, // how far other cavalry does
+  cavMorale: 50, // cavalry only charges above this morale
+  cavFatigue: 70, // and below this fatigue
+  cavWait: 450, // how far off the flank of an attack cavalry waits
+  pressRange: 600, // spare regiments attack enemies this close
+  pressMorale: 70, // when above this morale
+  pressOdds: 2, // and this many more regiments than the enemy nearby
+  pounceRange: 380, // line regiments charge a weaker enemy this close
+  pounceGap: 20, // when this much steadier than it
+  fortifyScale: 1, // multiplies how close the enemy must come before garrisons dig in
+  gunPrep: 4, // how much guns favour the defenders of an objective under attack
+  gunAttacking: 3, // and enemies fighting our regiments
+  gunSafe: 500, // guns do not move up to within this of the enemy
+  attackRatio: 1.15, // attack when this much stronger than the enemy as far as it can see
+  defendRatio: 0.7, // stand on the defensive when weaker than this
+  moraleLead: 20, // or attack when this far ahead on army morale
+  takeOdds: 0.9, // only attack an objective whose defenders are at most this share of our strike force
+  abortMorale: 40, // call off an attack when the attackers' morale falls below this
+  abortOdds: 0.6, // or their strength below this share of the defenders'
+  restAfter: 30, // seconds before a new attack after one fails
+  bombardTime: 35, // seconds the guns prepare an attack (60 against dug-in defenders)
+  chargeMorale: 45, // assault troops charge defenders below this morale
+  chargeOdds: 2, // or not dug in when they have this many regiments to each defender
+  reserveFrom: 6, // keep a reserve once there are this many infantry regiments
+  helpRange: 1500, // how far idle regiments go to help one under attack
+  helpers: 2, // how many go
+};
+
+// Which battle plan answers which enemy habit, from playing every plan against every other (60 battles a pair):
+// massed guns and strong horse are best met dug in with guns behind (Fortress won 62% against both), and troops
+// that dig in or a mass of infantry rushing the centre by a grand battery (38% against Fortress, which beats
+// everything, but 78% against an infantry rush).
+const FORTRESS = 0;
+const GRAND_BATTERY = 3;
+
+/** How strongly the enemy shows each habit, 0 to 1. */
+interface Signals {
+  guns: number;
+  dugIn: number;
+  rush: number;
+  horse: number;
+}
+
+/** The plan that best answers the enemy's strongest habit, if one stands out. */
+function counterPlan(s: Signals, threshold = 0.5): number | null {
+  const options: [number, number][] = [[s.guns, FORTRESS], [s.dugIn, GRAND_BATTERY], [s.rush, GRAND_BATTERY], [s.horse, FORTRESS]];
+  options.sort((a, b) => b[0] - a[0]);
+  return options[0][0] >= threshold ? options[0][1] : null;
+}
+
+const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
+
+/** A player's habits over earlier battles, as signals. */
+function habitSignals(h: Habits): Signals {
+  return {
+    guns: clamp01((h.guns - 0.15) / 0.2),
+    dugIn: clamp01((h.dugIn - 0.25) / 0.35),
+    rush: clamp01(h.centreRush),
+    horse: clamp01((h.cavalry - 0.15) / 0.2 * 0.6 + h.raids * 0.6),
+  };
+}
+export type Params = typeof PARAMS;
+
+export interface AIOptions {
+  doctrine?: Doctrine;
+  params?: Partial<Params>;
+  habits?: Habits; // how the enemy player has fought in earlier battles
+}
+
+/** A shell seen landing, remembered a little longer than the smoke lasts. */
+interface Shell {
+  x: number;
+  y: number;
+  t: number;
+}
+
+/**
  * A layered AI. A commander reviews the battle every few seconds and settles the army's posture and which
  * objective to attack. Regiments are then given roles (garrison, assault group, reserve, recovering), and
  * each role turns into orders through the same commands a human player uses. It only knows about enemies
@@ -89,14 +184,79 @@ export class AI {
   private reserveId: number | null = null;
   private assault = new Set<number>(); // regiments in the current attack
 
-  readonly doctrine: Doctrine;
+  private spots = new Map<number, Vec>(); // where each regiment was last told to stand
+  private shells: Shell[] = [];
+  private lastShell = -1;
+  private gunSpots = new Map<number, Vec>(); // high ground a battery is moving to before it opens fire
+
+  doctrine: Doctrine;
+  readonly params: Params;
+  private adaptAt = 120; // next battle time to review the plan against what the enemy is doing
+  private pending: number | null = null; // a change of plan seen at the last review, made if the next agrees
+  private switchedAt = -999;
+  private switches = 0;
+  private reported = false;
   private wingSign: number; // which flank a one-wing plan favours: +1 or -1, from the army's own point of view
 
   /** Battle plan from the battle's seed (or given), so a replay of the same seed fights the same way. */
-  constructor(readonly side: Side, seed = 1, doctrine?: Doctrine) {
+  constructor(readonly side: Side, seed = 1, opts: AIOptions = {}) {
     const h = Math.imul(seed * 2654435761 + side * 40503, 2246822519) >>> 0;
-    this.doctrine = doctrine ?? DOCTRINES[(h >>> 8) % DOCTRINES.length];
+    this.params = { ...PARAMS, ...opts.params };
+    this.doctrine = opts.doctrine ?? DOCTRINES[this.choosePlan(h, opts.habits)];
     this.wingSign = (h & 1) ? 1 : -1;
+  }
+
+  /**
+   * Pick the battle plan from the seed, so a replay fights the same way. Against a player with a known style,
+   * the plan that beats it is likelier: up to three times as likely after a few battles, never certain.
+   */
+  private choosePlan(h: number, habits?: Habits): number {
+    const weights = DOCTRINES.map(() => 1);
+    if (habits && habits.battles > 0 && this.params.remember > 0) {
+      const sure = Math.min(1, habits.battles / 3) * this.params.remember;
+      const s = habitSignals(habits);
+      const best = counterPlan(s, 0.25);
+      if (best !== null) weights[best] += 3 * sure * Math.max(s.guns, s.dugIn, s.rush, s.horse);
+    }
+    const total = weights.reduce((a, b) => a + b, 0);
+    if (total === weights.length) return (h >>> 8) % weights.length;
+    let roll = ((h >>> 8) % 10007) / 10007 * total;
+    for (let i = 0; i < weights.length; i++) {
+      roll -= weights[i];
+      if (roll < 0) return i;
+    }
+    return weights.length - 1;
+  }
+
+  /**
+   * Every half minute from the second minute on, compare what the enemy is doing with the plan, and switch to
+   * the plan that counters it when two reviews in a row agree. At most twice a battle, and not in quick succession.
+   */
+  private adapt(world: World, enemies: Unit[]) {
+    if (this.params.adapt <= 0 || world.time < this.adaptAt) return;
+    this.adaptAt = world.time + 30;
+    const seen = [...this.memory.values()];
+    const guns = seen.filter((s) => s.type === 'artillery').length;
+    const horse = seen.filter((s) => s.type === 'cavalry').length;
+    const foot = enemies.filter((e) => (e.type === 'line' || e.type === 'light') && e.state !== 'routing');
+    const dug = foot.filter((e) => formationOf(e) === 'fortified').length;
+    const centre = OBJECTIVES.find((o) => o.centre)!;
+    const atCentre = foot.filter((e) => dist(e, centre) < 700).length;
+    const signals: Signals = {
+      guns: guns >= 3 ? 1 : guns === 2 ? 0.3 : 0, // three batteries is as many as an army can field
+      dugIn: foot.length >= 3 ? clamp01((dug / foot.length - 0.3) / 0.4) : 0,
+      rush: world.time < 300 && atCentre >= 3 && atCentre >= foot.length * 0.6 ? 1 : 0,
+      horse: horse >= 3 ? 1 : horse === 2 ? 0.3 : 0,
+    };
+    const pick = counterPlan(signals, 1 - 0.5 * this.params.adapt);
+    if (pick === null || DOCTRINES[pick] === this.doctrine) { this.pending = null; return; }
+    if (this.pending !== pick) { this.pending = pick; return; }
+    if (this.switches >= 2 || world.time - this.switchedAt < 150) return;
+    this.doctrine = DOCTRINES[pick];
+    this.switches += 1;
+    this.switchedAt = world.time;
+    this.pending = null;
+    if (this.reported) world.log(this.side === 0 ? 1 : 0, `The enemy is changing its plan. ${this.doctrine.report}`);
   }
 
   update(world: World): Command[] {
@@ -141,10 +301,19 @@ export class AI {
 
   private orders(world: World): Command[] {
     const cmds: Command[] = [];
+    const P = this.params;
     const mine = world.units.filter((u) => u.side === this.side && u.state !== 'routing');
     const visibleEnemies = world.units.filter((u) => u.side !== this.side && u.seen[this.side]);
     this.remember(world, mine, visibleEnemies);
+    this.watchShells(world);
+    this.adapt(world, visibleEnemies);
+    // A minute in, the other side's scouts work out what kind of battle this army is fighting.
+    if (!this.reported && world.time > 60) {
+      this.reported = true;
+      world.log(this.side === 0 ? 1 : 0, this.doctrine.report);
+    }
     this.command(world, mine);
+    const stood = new Set<number>(); // regiments given a place to stand this time
     const needs = this.needs(world);
 
     // Greedy assignment: each regiment takes the nearest objective that still needs troops.
@@ -156,9 +325,9 @@ export class AI {
     // Worn regiments pull back to rest before they break, and come back once recovered.
     for (const u of infantry) {
       // Shaken regiments step back to recover before they break.
-      const worn = u.meleeWith === null && u.morale < 40;
+      const worn = u.meleeWith === null && u.morale < P.restAt;
       if (worn) this.recovering.add(u.id);
-      else if (u.morale > 75) this.recovering.delete(u.id);
+      else if (u.morale > P.restedAt) this.recovering.delete(u.id);
     }
     // One fresh line regiment stays back as a reserve once the army is big enough to spare it.
     const reserve = this.pickReserve(infantry);
@@ -172,7 +341,7 @@ export class AI {
       needs.forEach((n, i) => {
         if (n.need <= 0) return;
         // Stick with the objective it was already given, so regiments do not flip between two.
-        const score = dist(u, n.pos) - n.need * 150 - (this.lastGoal.get(u.id) === i ? 200 : 0);
+        const score = dist(u, n.pos) - n.need * P.needPull - (this.lastGoal.get(u.id) === i ? P.stickTo : 0);
         if (score < bestScore) { bestScore = score; best = i; }
       });
       if (best === -1 && this.plan.target !== null) {
@@ -195,6 +364,7 @@ export class AI {
     const assaultOrders = this.plan.target !== null ? this.assaultOrders(world, cmds, mine, visibleEnemies) : new Set<number>();
 
     const helpers = this.assignHelpers(mine, visibleEnemies, assigned, spare);
+    const footNear = (p: Vec, r: number) => visibleEnemies.some((e) => e.state !== 'routing' && !isSupport(e) && e.type !== 'artillery' && dist(e, p) < r);
 
     for (const u of mine) {
       if (u.meleeWith !== null) continue;
@@ -205,12 +375,12 @@ export class AI {
       if (u.type === 'general' || u.type === 'supply') {
         // Behind the attack while there is one, so its regiments fight inside the general's command radius.
         const anchor = this.plan.target !== null && this.assault.size >= 2 ? this.groupCentre(mine.filter((m) => this.assault.has(m.id))) : this.frontAnchor(mine);
-        const back = u.type === 'general' ? 450 : 550;
+        const back = u.type === 'general' ? P.hqBack : P.wagonsBack;
         const p = { x: anchor.x - this.dir() * back, y: anchor.y + (u.type === 'supply' ? this.dir() * 150 : 0) };
         // Pull back when the enemy gets close, and only return once well clear, so it does not shuttle to and fro.
         const horseWithin = (r: number) => visibleEnemies.some((e) => e.type === 'cavalry' && e.state !== 'routing' && dist(e, u) < r);
-        if (nd < 700 || horseWithin(1000)) this.fallingBack.add(u.id);
-        else if (nd > 900 && !horseWithin(1200)) this.fallingBack.delete(u.id);
+        if (nd < P.shyOf || horseWithin(P.shyOf + 300)) this.fallingBack.add(u.id);
+        else if (nd > P.shyOf + 200 && !horseWithin(P.shyOf + 500)) this.fallingBack.delete(u.id);
         if (this.fallingBack.has(u.id)) p.x = anchor.x - this.dir() * (back + 400);
         this.moveIfFar(cmds, u, clampToMap(p, RULES.borderWidth + 80), 200);
         continue;
@@ -219,12 +389,12 @@ export class AI {
       if (u.type === 'cavalry') {
         // Raiders range much further after guns, wagons and the general.
         // Deep raids only go for targets no formed infantry is guarding.
-        const reach = this.doctrine.raid ? 1400 : 800;
+        const reach = this.doctrine.raid ? P.raidReach : P.cavReach;
         const guarded = (e: Unit) => visibleEnemies.some((g) => g !== e && (g.type === 'line' || g.type === 'light') && g.state !== 'routing' && dist(g, e) < 300);
         const prey = visibleEnemies
           .filter((e) => dist(u, e) < reach && formationOf(e) !== 'fortified' && (e.state !== 'ok' || e.type === 'artillery' || e.type === 'light' || e.type === 'supply'
             || (e.type === 'general' && dist(u, e) < (this.doctrine.raid ? 1200 : 450)))
-            && (dist(u, e) < 800 || !guarded(e)))
+            && (dist(u, e) < P.cavReach || !guarded(e)))
           .sort((a, b) => dist(u, a) - dist(u, b))[0];
         // Otherwise hit the flank or rear of an enemy already fighting our infantry.
         const target = prey ?? visibleEnemies
@@ -232,16 +402,16 @@ export class AI {
             && mine.some((m) => m.type !== 'cavalry' && !isSupport(m) && dist(m, e) < 350)
             && Math.abs(angleDiff(e.facing, Math.atan2(u.y - e.y, u.x - e.x))) > Math.PI / 3)
           .sort((a, b) => dist(u, a) - dist(u, b))[0];
-        if (target && u.morale > 50 && u.fatigue < 70) {
+        if (target && u.morale > P.cavMorale && u.fatigue < P.cavFatigue) {
           if (u.order.kind !== 'attack' || u.order.target !== target.id) cmds.push({ kind: 'attack', side: this.side, ids: [u.id], target: target.id });
-        } else if (this.plan.target !== null && u.morale > 50) {
+        } else if (this.plan.target !== null && u.morale > P.cavMorale) {
           // Wait off the flank of the objective under attack, ready to fall on defenders once they are engaged.
           const t = OBJECTIVES[this.plan.target];
           const stage = this.stagingPoint(mine);
           const along = { x: t.x - stage.x, y: t.y - stage.y };
           const len = Math.hypot(along.x, along.y) || 1;
           const side = this.doctrine.wing ? this.wingSign * this.dir() : this.slot(u.id) % 2 ? 1 : -1;
-          this.moveIfFar(cmds, u, clampToMap({ x: stage.x - (along.y / len) * 450 * side, y: stage.y + (along.x / len) * 450 * side }, RULES.borderWidth + 80));
+          this.moveIfFar(cmds, u, clampToMap({ x: stage.x - (along.y / len) * P.cavWait * side, y: stage.y + (along.x / len) * P.cavWait * side }, RULES.borderWidth + 80));
         } else if (this.doctrine.raid || this.doctrine.wing) {
           // Out on the chosen flank, just behind the line, looking for an opening.
           const anchor = this.frontAnchor(mine);
@@ -255,10 +425,12 @@ export class AI {
 
       if (u.type === 'artillery') {
         // With nothing to shell, guns move up behind the line toward the fighting.
-        if (!this.aimGuns(world, cmds, u, mine, visibleEnemies) && !u.fireZone) {
+        if (!this.aimGuns(world, cmds, u, mine, visibleEnemies, stood) && !u.fireZone) {
           const anchor = this.frontAnchor(mine);
           const hot = this.plan.target !== null ? OBJECTIVES[this.plan.target] : this.hotObjective(world, visibleEnemies);
-          this.moveIfFar(cmds, u, clampToMap({ x: anchor.x - this.dir() * 300, y: (anchor.y + hot.y) / 2 }, RULES.borderWidth + 80), 200);
+          const at = clampToMap({ x: anchor.x - this.dir() * 300, y: (anchor.y + hot.y) / 2 }, RULES.borderWidth + 80);
+          // Wait on high ground if there is some close by, or hidden in woods.
+          this.moveIfFar(cmds, u, (P.gunGround > 0 ? this.stand(u, at, 200, AI.gunGround, stood) : null) ?? at, 200);
         }
         continue;
       }
@@ -280,14 +452,17 @@ export class AI {
       const help = helpers.get(u.id);
       if (help) {
         if (u.formation !== 'formation') cmds.push({ kind: 'formation', side: this.side, ids: [u.id], formation: 'formation' });
-        if (help.dist > UNIT_TYPES[u.type].range * 0.9 || u.order.kind !== 'hold') this.moveIfFar(cmds, u, help.spot, 80);
+        // Fire from cover if there is some within range of the attacker.
+        const reach = UNIT_TYPES[u.type].range * 0.9;
+        const spot = (P.coverFire > 0 ? this.stand(u, help.spot, 90, AI.cover, stood, (p) => dist(p, help.attacker) < reach) : null) ?? help.spot;
+        if (help.dist > reach || u.order.kind !== 'hold') this.moveIfFar(cmds, u, spot, 80);
         continue;
       }
 
       const goal = assigned.get(u.id)!;
       // Light infantry works round the flank of whoever our line is fighting.
       if (u.type === 'light' && u.building <= 0) {
-        const flank = this.flankSpot(u, mine, visibleEnemies);
+        const flank = this.flankSpot(u, mine, visibleEnemies, stood);
         if (flank) {
           if (u.formation !== 'formation') cmds.push({ kind: 'formation', side: this.side, ids: [u.id], formation: 'formation' });
           if (!(nd < UNIT_TYPES.light.range * 0.9 && u.order.kind === 'hold')) this.moveIfFar(cmds, u, flank, 80);
@@ -297,12 +472,12 @@ export class AI {
       // Spare regiments press home on enemies near the hot objective.
       const odds = nearest ? mine.filter((m) => !isSupport(m) && dist(m, nearest) < 500).length
         - visibleEnemies.filter((e) => e.state !== 'routing' && dist(e, nearest) < 500).length : 0;
-      if (spare.has(u.id) && nearest && nd < 600 && nearest.state !== 'routing' && formationOf(nearest) !== 'fortified' && u.morale > 70 && odds >= 2) {
+      if (spare.has(u.id) && nearest && nd < P.pressRange && nearest.state !== 'routing' && formationOf(nearest) !== 'fortified' && u.morale > P.pressMorale && odds >= P.pressOdds) {
         if (u.formation !== 'formation') cmds.push({ kind: 'formation', side: this.side, ids: [u.id], formation: 'formation' });
         if (u.order.kind !== 'attack') cmds.push({ kind: 'attack', side: this.side, ids: [u.id], target: nearest.id });
         continue;
       }
-      const enemyWeak = nearest && nd < 380 && (nearest.state === 'wavering' || (u.morale > 65 && nearest.morale < u.morale - 20));
+      const enemyWeak = nearest && nd < P.pounceRange && (nearest.state === 'wavering' || (u.morale > 65 && nearest.morale < u.morale - P.pounceGap));
       if (u.type === 'line' && enemyWeak && nearest) {
         if (u.formation !== 'formation') cmds.push({ kind: 'formation', side: this.side, ids: [u.id], formation: 'formation' });
         if (u.order.kind !== 'attack') cmds.push({ kind: 'attack', side: this.side, ids: [u.id], target: nearest.id });
@@ -320,15 +495,79 @@ export class AI {
       const atGoal = dist(u, goal) < 250;
       const cavThreat = visibleEnemies.some((e) => e.type === 'cavalry' && e.state === 'ok' && dist(e, u) < 300);
       // Troops already in a fight cannot start digging in, so only ask when the order will be accepted.
-      const wanted = atGoal && (nd < this.doctrine.fortifyAt || cavThreat) && (u.formation === 'fortified' || world.canFortify(u)) ? 'fortified' : 'formation';
+      const wanted = atGoal && (nd < this.doctrine.fortifyAt * P.fortifyScale || cavThreat) && (u.formation === 'fortified' || world.canFortify(u)) ? 'fortified' : 'formation';
       if (u.formation !== wanted) cmds.push({ kind: 'formation', side: this.side, ids: [u.id], formation: wanted });
-      // Spread regiments around the objective, mirrored so both sides behave the same way.
+      // Stand in the best cover at the objective, spread out from the others. While shells fall on it and no
+      // enemy foot is near enough to rush it, step back out of the fire to cover nearby.
+      const shelled = this.params.dodgeShells > 0 && this.shellfire(goal) > 0 && !footNear(goal, 1000);
       const n = this.slot(u.id);
-      const spot = { x: goal.x + this.dir() * (((n * 37) % 160) - 120), y: goal.y + this.dir() * (((n * 53) % 200) - 100) };
+      const spot = (P.ground > 0 || shelled ? this.stand(u, goal, shelled ? 350 : spare.has(u.id) ? 150 : 130, AI.cover, stood, undefined, !shelled) : null)
+        ?? { x: goal.x + this.dir() * (((n * 37) % 160) - 120), y: goal.y + this.dir() * (((n * 53) % 200) - 100) };
       if (nd < UNIT_TYPES[u.type].range * 0.9 && u.order.kind === 'hold') continue; // in a firefight, stand
       this.moveIfFar(cmds, u, spot, 90);
     }
+    for (const id of this.spots.keys()) if (!stood.has(id)) this.spots.delete(id);
     return cmds;
+  }
+
+  // How good a piece of ground is to stand on, for each kind of regiment.
+  private static cover = (t: Terrain) => (1 - t.cover) * 120 + (t.hill ? 10 : 0) - (t.marsh ? 60 : 0);
+  private static gunGround = (t: Terrain) => (t.hill ? 80 : 0) + (t.woods ? 30 : 0) - (t.marsh ? 60 : 0);
+  private static skirmishGround = (t: Terrain) => (t.woods ? 70 : 0) + (1 - t.cover) * 40 - (t.marsh ? 60 : 0);
+
+  /**
+   * The best place for a regiment to stand within r of a point: woods, a town, earthworks or a hill if there
+   * are any, clear of the places given to other regiments and of where shells are falling. The ground is
+   * sampled on a grid laid out from this army's side, so both armies read mirrored ground the same way.
+   * Returns null when every spot is taken.
+   */
+  private stand(u: Unit, centre: Vec, r: number, value: (t: Terrain) => number, stood: Set<number>, ok?: (p: Vec) => boolean, behind = false): Vec | null {
+    const step = 30;
+    const n = Math.floor(r / step);
+    const prev = this.spots.get(u.id);
+    const others = [...this.spots].filter(([id]) => id !== u.id).map(([, p]) => p);
+    let best: Vec | null = null;
+    let bestScore = -Infinity;
+    for (let i = -n; i <= n; i++) {
+      for (let j = -n; j <= n; j++) {
+        const off = Math.hypot(i, j) * step;
+        if (off > r) continue;
+        // Garrisons keep to their own side of the objective, out of the enemy's way, as they did before.
+        if (behind && i > 1) continue;
+        const p = { x: centre.x + this.dir() * i * step, y: centre.y + this.dir() * j * step };
+        if (p.x < RULES.borderWidth + 80 || p.x > MAP.width - RULES.borderWidth - 80 || p.y < RULES.borderWidth + 80 || p.y > MAP.height - RULES.borderWidth - 80) continue;
+        // Regiments stand in line abreast, so they need more room side to side than front to back.
+        if (others.some((o) => Math.abs(o.x - p.x) < 45 && Math.abs(o.y - p.y) < 140)) continue;
+        if (ok && !ok(p)) continue;
+        // A little nearer our own side is better than a little nearer the enemy.
+        const score = value(terrainAt(p)) - off * 0.15 - i * step * 0.05
+          + (prev && dist(p, prev) < 25 ? 40 : 0) - this.shellfire(p) * 80;
+        if (score > bestScore) { bestScore = score; best = p; }
+      }
+    }
+    if (best) {
+      this.spots.set(u.id, best);
+      stood.add(u.id);
+    }
+    return best;
+  }
+
+  /** Keep track of where enemy shells have been landing lately. */
+  private watchShells(world: World) {
+    for (const i of world.impacts) {
+      // Only shells from the other side: our own guns' fire is not a reason to move.
+      if (i.t <= this.lastShell || i.side === this.side) continue;
+      this.shells.push({ x: i.x, y: i.y, t: i.t });
+    }
+    this.lastShell = world.impacts.reduce((a, i) => Math.max(a, i.t), this.lastShell);
+    this.shells = this.shells.filter((s) => world.time - s.t < 12);
+  }
+
+  /** How heavily shells have been falling around a spot lately: 0 for none, 1 for steady fire. */
+  private shellfire(p: Vec): number {
+    let n = 0;
+    for (const s of this.shells) if (Math.abs(s.x - p.x) < 200 && Math.abs(s.y - p.y) < 200 && dist(s, p) < 200) n++;
+    return Math.min(1, n / 3);
   }
 
   /** Where engineers should build: a held objective with no enemy close, nearest the hot spot. */
@@ -357,7 +596,7 @@ export class AI {
   }
 
   /** A firing spot off the flank of an enemy that our troops are already engaging, if there is one nearby. */
-  private flankSpot(u: Unit, mine: Unit[], enemies: Unit[]): Vec | null {
+  private flankSpot(u: Unit, mine: Unit[], enemies: Unit[], stood: Set<number>): Vec | null {
     let target: Unit | undefined;
     let bd = 1000;
     for (const e of enemies) {
@@ -371,7 +610,11 @@ export class AI {
     const across = { x: -Math.sin(target.facing), y: Math.cos(target.facing) };
     const sign = (u.x - target.x) * across.x + (u.y - target.y) * across.y >= 0 ? 1 : -1;
     const r = UNIT_TYPES.light.range * 0.8;
-    return clampToMap({ x: target.x + across.x * sign * r, y: target.y + across.y * sign * r }, RULES.borderWidth + 80);
+    const spot = clampToMap({ x: target.x + across.x * sign * r, y: target.y + across.y * sign * r }, RULES.borderWidth + 80);
+    // Skirmish from woods where there are some within range.
+    const t = target;
+    if (this.params.coverFire <= 0) return spot;
+    return this.stand(u, spot, 90, AI.skirmishGround, stood, (p) => dist(p, t) < UNIT_TYPES.light.range * 0.9) ?? spot;
   }
 
   /**
@@ -379,8 +622,11 @@ export class AI {
    * the battery moves up to reach them, as long as the firing spot is not too close to the enemy.
    * Returns true if the battery has a target.
    */
-  private aimGuns(world: World, cmds: Command[], u: Unit, mine: Unit[], enemies: Unit[]): boolean {
-    if ((this.lastAim.get(u.id) ?? -99) > world.time - 5) return !!u.fireZone;
+  private aimGuns(world: World, cmds: Command[], u: Unit, mine: Unit[], enemies: Unit[], stood: Set<number>): boolean {
+    if ((this.lastAim.get(u.id) ?? -99) > world.time - 5) {
+      if (this.gunSpots.has(u.id)) stood.add(u.id);
+      return !!u.fireZone || this.gunSpots.has(u.id);
+    }
     this.lastAim.set(u.id, world.time);
     const range = UNIT_TYPES.artillery.range;
     let best: Unit | undefined;
@@ -390,21 +636,38 @@ export class AI {
       if (e.state === 'routing' || d > range + 800) continue;
       if (d > range * 0.95) {
         const stop = { x: e.x + ((u.x - e.x) / d) * range * 0.9, y: e.y + ((u.y - e.y) / d) * range * 0.9 };
-        if (enemies.some((o) => o.state !== 'routing' && dist(o, stop) < 500)) continue;
+        if (enemies.some((o) => o.state !== 'routing' && dist(o, stop) < this.params.gunSafe)) continue;
       }
       const friends = mine.filter((o) => dist(o, e) < 180).length;
       if (friends > 0 && e.meleeWith === null) continue; // too close to our own troops
       const crowd = enemies.filter((o) => o.state !== 'routing' && dist(o, e) < 200).length;
-      const attacking = mine.some((m) => !isSupport(m) && (m.meleeWith === e.id || dist(m, e) < 400)) ? 3 : 0;
+      const attacking = mine.some((m) => !isSupport(m) && (m.meleeWith === e.id || dist(m, e) < 400)) ? this.params.gunAttacking : 0;
       const fortified = formationOf(e) === 'fortified' ? 1 : 0;
       // Before and during an attack, the guns work on the defenders of the objective.
-      const prep = this.plan.target !== null && dist(e, OBJECTIVES[this.plan.target]) < 600 ? 4 : 0;
+      const prep = this.plan.target !== null && dist(e, OBJECTIVES[this.plan.target]) < 600 ? this.params.gunPrep : 0;
       const score = crowd + attacking + fortified + prep - friends * 2 - (d > range ? 1.5 : 0);
       if (score > bestScore) { bestScore = score; best = e; }
     }
+    this.gunSpots.delete(u.id);
     if (!best) {
       if (u.fireZone) cmds.push({ kind: 'ceaseFire', side: this.side, ids: [u.id] });
       return false;
+    }
+    // Out of range: bring the guns up onto high ground in reach of the target if there is some, where they
+    // see and shoot further, rather than straight up the open. Not anywhere enemy foot could rush them.
+    const reach = (p: Vec) => range * (terrainAt(p).hill ? 1.2 : 1);
+    const d = dist(u, best);
+    if (d > reach(u) && this.params.gunGround > 0) {
+      const b = best;
+      const stop = { x: b.x + ((u.x - b.x) / d) * range * 0.9, y: b.y + ((u.y - b.y) / d) * range * 0.9 };
+      const safe = (p: Vec) => dist(p, b) < reach(p) * 0.92 && !enemies.some((o) => o.state !== 'routing' && !isSupport(o) && dist(o, p) < this.params.gunSafe);
+      const spot = this.stand(u, stop, 300, AI.gunGround, stood, safe);
+      if (spot && terrainAt(spot).hill) {
+        this.gunSpots.set(u.id, spot);
+        if (u.fireZone) cmds.push({ kind: 'ceaseFire', side: this.side, ids: [u.id] });
+        this.moveIfFar(cmds, u, spot, 40);
+        return true;
+      }
     }
     if (!u.fireZone || dist(u.fireZone, best) > 60) cmds.push({ kind: 'bombard', side: this.side, ids: [u.id], x: best.x, y: best.y });
     return true;
@@ -415,7 +678,7 @@ export class AI {
    * an objective's only defender) move to fire into the attacker's flank.
    */
   private assignHelpers(mine: Unit[], enemies: Unit[], assigned: Map<number, Vec>, spare: Set<number>) {
-    const helpers = new Map<number, { spot: Vec; dist: number }>();
+    const helpers = new Map<number, { spot: Vec; dist: number; attacker: Unit }>();
     const busy = (m: Unit) => m.meleeWith !== null || m.underFire > 0 || m.building > 0
       || enemies.some((e) => e.state !== 'routing' && dist(e, m) < 600);
     const canSpare = (m: Unit) => {
@@ -432,14 +695,14 @@ export class AI {
         .filter((e) => e.state !== 'routing' && (friend.meleeWith === e.id || dist(e, friend) < 450))
         .sort((a, b) => dist(a, friend) - dist(b, friend))[0];
       if (!attacker) continue;
-      const near = free.filter((m) => !helpers.has(m.id) && dist(m, attacker) < 1500).sort((a, b) => dist(a, attacker) - dist(b, attacker));
-      for (const m of near.slice(0, 2)) {
+      const near = free.filter((m) => !helpers.has(m.id) && dist(m, attacker) < this.params.helpRange).sort((a, b) => dist(a, attacker) - dist(b, attacker));
+      for (const m of near.slice(0, Math.round(this.params.helpers))) {
         // Off the attacker's flank, on our side of it, at musket range.
         const across = { x: -Math.sin(attacker.facing), y: Math.cos(attacker.facing) };
         const sign = (m.x - attacker.x) * across.x + (m.y - attacker.y) * across.y >= 0 ? 1 : -1;
         const r = UNIT_TYPES[m.type].range * 0.85;
         const spot = clampToMap({ x: attacker.x + across.x * sign * r, y: attacker.y + across.y * sign * r }, RULES.borderWidth + 80);
-        helpers.set(m.id, { spot, dist: dist(m, attacker) });
+        helpers.set(m.id, { spot, dist: dist(m, attacker), attacker });
       }
     }
     return helpers;
@@ -494,6 +757,7 @@ export class AI {
    */
   private command(world: World, mine: Unit[]) {
     const p = this.plan;
+    const P = this.params;
     const t = p.target;
     // Drop a target once it is ours and clear of the enemy.
     if (t !== null && world.owners[t] === this.side && this.enemyPowerNear(OBJECTIVES[t], 500) === 0) this.endAttack(world, false);
@@ -510,8 +774,8 @@ export class AI {
     const heldByThem = world.owners.filter((o) => o === 1 - this.side).length;
     const late = world.time > RULES.finalPushAt - 90;
     const losing = me.score < them.score - 0.5 || me.armyMorale < them.armyMorale - 10;
-    if (ratio > 1.15 || me.armyMorale > them.armyMorale + 20 || (ratio > 0.8 && (heldByThem > heldByUs || (late && losing)))) p.posture = 'attack';
-    else if (ratio < 0.7 && !(late && losing)) p.posture = 'defend';
+    if (ratio > P.attackRatio || me.armyMorale > them.armyMorale + P.moraleLead || (ratio > 0.8 && (heldByThem > heldByUs || (late && losing)))) p.posture = 'attack';
+    else if (ratio < P.defendRatio && !(late && losing)) p.posture = 'defend';
     else p.posture = 'hold';
 
     if (p.posture === 'defend') {
@@ -525,7 +789,7 @@ export class AI {
     if (p.target !== null && p.phase === 'assault' && group.length) {
       const morale = group.reduce((a, u) => a + u.morale, 0) / group.length;
       const local = group.reduce((a, u) => a + this.value(u), 0);
-      if (morale < 40 || local < this.enemyPowerNear(OBJECTIVES[p.target], 600) * 0.6) {
+      if (morale < P.abortMorale || local < this.enemyPowerNear(OBJECTIVES[p.target], 600) * P.abortOdds) {
         this.endAttack(world, true);
         return;
       }
@@ -536,7 +800,7 @@ export class AI {
     const strike = mine.filter((u) => u.type === 'line' || u.type === 'light' || u.type === 'cavalry').reduce((a, u) => a + this.value(u), 0);
     // Holding nothing at all is close to losing outright, so any objective will do.
     const desperate = heldByUs === 0 && heldByThem > 0;
-    const limit = desperate ? 2 : 0.9;
+    const limit = desperate ? 2 : P.takeOdds;
     let best: number | null = null;
     let bestScore = -Infinity;
     OBJECTIVES.forEach((o, i) => {
@@ -568,7 +832,7 @@ export class AI {
   private endAttack(world: World, failed: boolean) {
     this.plan.target = null;
     this.plan.phase = 'gather';
-    if (failed) this.plan.restUntil = world.time + 30;
+    if (failed) this.plan.restUntil = world.time + this.params.restAfter;
   }
 
   /** Where the assault group forms up: short of the objective, on the side facing our army. */
@@ -612,7 +876,8 @@ export class AI {
       if (formed >= Math.ceil(sorted.length * 0.7) || elapsed > 50) { p.phase = defenders.length ? 'bombard' : 'assault'; p.phaseAt = world.time; }
     } else if (p.phase === 'bombard') {
       const shaken = defenders.length > 0 && defenders.every((e) => e.state === 'wavering' || e.morale < 55);
-      if (!defenders.length || shaken || elapsed > (fortified ? 60 : 35)) { p.phase = 'assault'; p.phaseAt = world.time; }
+      const prepTime = this.params.bombardTime * (fortified ? 60 / 35 : 1);
+      if (!defenders.length || shaken || elapsed > prepTime) { p.phase = 'assault'; p.phaseAt = world.time; }
     }
 
     // The firing line: just inside musket range of the defenders, or of the objective itself.
@@ -636,7 +901,7 @@ export class AI {
         return;
       }
       if (u.type === 'light') {
-        const flank = this.flankSpot(u, mine, enemies);
+        const flank = this.flankSpot(u, mine, enemies, new Set());
         if (flank) { this.moveIfFar(cmds, u, flank, 80); return; }
       }
       if (!defenders.length) {
@@ -648,7 +913,7 @@ export class AI {
       const ranked = defenders.slice().sort((a, b) => (a.morale + dist(a, line) * 0.1) - (b.morale + dist(b, line) * 0.1));
       const foe = ranked[Math.floor(k / 2) % ranked.length];
       const odds = sorted.length / defenders.length;
-      const charge = foe.state === 'wavering' || foe.morale < 45 || (formationOf(foe) !== 'fortified' && odds >= 2 && foe.morale < 75);
+      const charge = foe.state === 'wavering' || foe.morale < this.params.chargeMorale || (formationOf(foe) !== 'fortified' && odds >= this.params.chargeOdds && foe.morale < 75);
       if (charge) {
         if (u.order.kind !== 'attack' || u.order.target !== foe.id) cmds.push({ kind: 'attack', side: this.side, ids: [u.id], target: foe.id });
         return;
@@ -663,7 +928,7 @@ export class AI {
   /** The freshest line regiment not tied down, kept back once the army has six or more infantry regiments. */
   private pickReserve(infantry: Unit[]): number | null {
     const line = infantry.filter((u) => u.type === 'line' && !this.recovering.has(u.id));
-    if (infantry.length < 6 || !this.doctrine.reserve) { this.reserveId = null; return null; }
+    if (infantry.length < this.params.reserveFrom || !this.doctrine.reserve) { this.reserveId = null; return null; }
     const current = line.find((u) => u.id === this.reserveId);
     if (current && (current.order.kind === 'attack' || current.morale > 60)) return current.id;
     const fresh = line.slice().sort((a, b) => this.value(b) - this.value(a) || a.id - b.id)[0];

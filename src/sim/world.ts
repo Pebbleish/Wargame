@@ -60,6 +60,7 @@ export interface Impact {
   x: number;
   y: number;
   t: number;
+  side: Side; // whose battery fired it
 }
 
 /** A cart of ammunition on its way from the wagon train to a regiment. It can be shot up on the road. */
@@ -1031,7 +1032,7 @@ export class World {
     const a = this.rng.range(0, Math.PI * 2);
     const r = Math.sqrt(this.rng.next()) * RULES.bombardRadius;
     const hit = { x: zone.x + Math.cos(a) * r, y: zone.y + Math.sin(a) * r };
-    this.impacts.push({ ...hit, t: this.time });
+    this.impacts.push({ ...hit, t: this.time, side: u.side });
     const strength = (u.men / u.maxMen) * this.firepower(u);
     for (const t of this.units) {
       const d = dist(t, hit) - unitRadius(t) * 0.6;

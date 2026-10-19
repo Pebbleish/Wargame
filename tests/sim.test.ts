@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { MAP, RULES, UNIT_TYPES } from '../src/sim/config';
 import { EARTHWORKS, OBJECTIVES, RIVER, generateMap, terrainAt } from '../src/sim/map';
 import { AI } from '../src/sim/ai';
+import { NO_HABITS, mergeHabits, parseHabits } from '../src/sim/habits';
 import { World } from '../src/sim/world';
 
 function playOut(seed: number) {
@@ -90,5 +91,34 @@ describe('battle simulation', () => {
       }
     }
     expect(open).toBeGreaterThan(0);
+  });
+});
+
+describe('player habits', () => {
+  it('reads back only sane values from storage', () => {
+    expect(parseHabits(null)).toEqual(NO_HABITS);
+    expect(parseHabits('not json')).toEqual(NO_HABITS);
+    const h = parseHabits(JSON.stringify({ battles: 3, guns: 2, dugIn: -1, cavalry: 'x', raids: 0.5 }));
+    expect(h).toEqual({ ...NO_HABITS, battles: 3, guns: 1, dugIn: 0, raids: 0.5 });
+  });
+
+  it('weights recent battles most', () => {
+    const one = mergeHabits(NO_HABITS, { ...NO_HABITS, battles: 1, dugIn: 1 });
+    expect(one.dugIn).toBe(1);
+    const two = mergeHabits(one, { ...NO_HABITS, battles: 1, dugIn: 0 });
+    expect(two.battles).toBe(2);
+    expect(two.dugIn).toBeCloseTo(0.6);
+  });
+
+  it('leans the AI towards the plan that beats a known style', () => {
+    const turtle = { ...NO_HABITS, battles: 5, dugIn: 0.9 };
+    let grand = 0;
+    let base = 0;
+    for (let seed = 1; seed <= 200; seed++) {
+      if (new AI(1, seed, { habits: turtle }).doctrine.name === 'Grand battery') grand++;
+      if (new AI(1, seed).doctrine.name === 'Grand battery') base++;
+    }
+    expect(grand).toBeGreaterThan(base * 2);
+    expect(grand).toBeLessThan(200); // still not every time
   });
 });

@@ -1,6 +1,7 @@
 import Phaser from 'phaser';
 import { MAP, RULES, UNIT_TYPES, UnitTypeId } from '../sim/config';
 import { AI } from '../sim/ai';
+import { HabitWatcher, mergeHabits, parseHabits } from '../sim/habits';
 import { CROSSINGS, EARTHWORKS, OBJECTIVES, Vec, dist } from '../sim/map';
 import { Side, Unit, World, experienceOf, formationOf, inZone, isSupport, unitRadius, unitSize } from '../sim/world';
 import { Hud } from './hud';
@@ -50,7 +51,7 @@ export class BattleScene extends Phaser.Scene {
   private keys: Record<string, boolean> = {};
   private pointerWorld: Vec = { x: 0, y: 0 };
   private overCanvas = true;
-  private scouted = false; // the scouts' report on the enemy's battle plan has come in
+  private watcher: HabitWatcher | null = null; // notes how the player fights, for the AI's next battle
   private mapLayer: Phaser.GameObjects.GameObject[] = [];
   private aiming = false; // placing the fire circle for the selected batteries
 
@@ -108,8 +109,9 @@ export class BattleScene extends Phaser.Scene {
   private newBattle() {
     this.world = new World(this.seed);
     this.buildMap();
-    this.ais = this.spectating ? [new AI(0, this.seed), new AI(1, this.seed)] : [new AI(1, this.seed)];
-    this.scouted = false;
+    // The AI remembers how the player fought in earlier battles and picks its plan with that in mind.
+    this.ais = this.spectating ? [new AI(0, this.seed), new AI(1, this.seed)] : [new AI(1, this.seed, { habits: loadHabits() })];
+    this.watcher = this.spectating ? null : new HabitWatcher(PLAYER);
     this.selected.clear();
     this.pendingCallIn = null;
     this.aiming = false;
@@ -457,13 +459,14 @@ export class BattleScene extends Phaser.Scene {
       let guard = 0;
       while (this.acc >= STEP && guard++ < 60) {
         for (const ai of this.ais) for (const c of ai.update(this.world)) this.world.apply(c);
-        // A minute in, the scouts work out what kind of battle the enemy is fighting.
-        if (!this.scouted && this.world.phase === 'battle' && this.world.time > 60) {
-          this.scouted = true;
-          for (const ai of this.ais) this.world.log(ai.side === 0 ? 1 : 0, ai.doctrine.report);
-        }
+        this.watcher?.observe(this.world);
         this.world.step();
         this.acc -= STEP;
+        // Once the battle is over, add how the player fought to the record.
+        if (this.watcher && this.world.phase === 'ended') {
+          if (this.world.time > 120) saveHabits(mergeHabits(loadHabits(), this.watcher.result()));
+          this.watcher = null;
+        }
       }
     }
     for (const id of [...this.selected]) {
@@ -915,5 +918,23 @@ export class BattleScene extends Phaser.Scene {
       to.x - Math.cos(a - 0.4) * s, to.y - Math.sin(a - 0.4) * s,
       to.x - Math.cos(a + 0.4) * s, to.y - Math.sin(a + 0.4) * s,
     );
+  }
+}
+
+const HABITS_KEY = 'wargame.habits';
+
+function loadHabits() {
+  try {
+    return parseHabits(localStorage.getItem(HABITS_KEY));
+  } catch {
+    return parseHabits(null);
+  }
+}
+
+function saveHabits(h: ReturnType<typeof loadHabits>) {
+  try {
+    localStorage.setItem(HABITS_KEY, JSON.stringify(h));
+  } catch {
+    // Storage blocked: the AI simply will not remember this battle.
   }
 }
