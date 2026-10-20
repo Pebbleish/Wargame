@@ -6,6 +6,7 @@ import {
   generateMap, nearCrossing, nearestRiverPoint, planRoute, terrainAt,
 } from './map';
 import { Rng } from './rng';
+import { mapFor } from './fairmaps';
 
 export type Side = 0 | 1;
 export type UnitState = 'ok' | 'wavering' | 'routing';
@@ -271,8 +272,9 @@ export class World {
   private nextGroup = 1;
   private groupSpeed = new Map<number, number>();
 
-  constructor(seed = 1, nations: [string, string] = ['Valdmark', 'Ostmark']) {
-    generateMap(seed);
+  /** mapSeed picks the battlefield; by default one of the maps vetted as fair (see fairmaps.ts) is taken from the seed. */
+  constructor(seed = 1, nations: [string, string] = ['Valdmark', 'Ostmark'], mapSeed = mapFor(seed)) {
+    generateMap(mapSeed);
     this.owners = OBJECTIVES.map(() => -1);
     this.rng = new Rng(seed);
     this.sides = [newSide(nations[0]), newSide(nations[1])];

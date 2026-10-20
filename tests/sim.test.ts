@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { MAP, RULES, UNIT_TYPES } from '../src/sim/config';
-import { EARTHWORKS, OBJECTIVES, RIVER, generateMap, terrainAt } from '../src/sim/map';
+import { EARTHWORKS, MAP_OPTIONS, OBJECTIVES, RIVER, generateMap, terrainAt } from '../src/sim/map';
 import { AI } from '../src/sim/ai';
 import { NO_HABITS, mergeHabits, parseHabits } from '../src/sim/habits';
 import { World } from '../src/sim/world';
@@ -100,17 +100,37 @@ describe('battle simulation', () => {
     expect(terrainAt(eng).cover).toBeLessThan(1);
   });
 
-  it('generates point-symmetric maps, some without a river', () => {
+  it('generates point-symmetric maps when asked, some without a river', () => {
     let open = 0;
-    for (let seed = 1; seed <= 20; seed++) {
-      generateMap(seed);
-      if (RIVER.length === 0) open++;
-      for (const o of OBJECTIVES) {
-        const twin = OBJECTIVES.find((p) => Math.abs(p.x - (MAP.width - o.x)) < 1e-6 && Math.abs(p.y - (MAP.height - o.y)) < 1e-6);
-        expect(twin).toBeDefined();
+    MAP_OPTIONS.uneven = false;
+    try {
+      for (let seed = 1; seed <= 20; seed++) {
+        generateMap(seed);
+        if (RIVER.length === 0) open++;
+        for (const o of OBJECTIVES) {
+          const twin = OBJECTIVES.find((p) => Math.abs(p.x - (MAP.width - o.x)) < 1e-6 && Math.abs(p.y - (MAP.height - o.y)) < 1e-6);
+          expect(twin).toBeDefined();
+        }
       }
+    } finally {
+      MAP_OPTIONS.uneven = true;
     }
     expect(open).toBeGreaterThan(0);
+  });
+
+  it('lays out uneven maps with two home towns a side, each on its own half', () => {
+    let differ = 0;
+    for (let seed = 1; seed <= 20; seed++) {
+      generateMap(seed);
+      for (const side of [0, 1]) {
+        const homes = OBJECTIVES.filter((o) => o.home === side);
+        expect(homes).toHaveLength(2);
+        for (const h of homes) expect(side === 0 ? h.x < MAP.width / 2 : h.x > MAP.width / 2).toBe(true);
+      }
+      const mirrored = OBJECTIVES.every((o) => OBJECTIVES.some((p) => Math.abs(p.x - (MAP.width - o.x)) < 1e-6 && Math.abs(p.y - (MAP.height - o.y)) < 1e-6));
+      if (!mirrored) differ++;
+    }
+    expect(differ).toBeGreaterThan(15);
   });
 });
 

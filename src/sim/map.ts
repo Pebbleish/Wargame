@@ -22,8 +22,10 @@ export interface Crossing { x: number; y: number; name: string; ford: boolean; p
 export interface Earthwork extends Circle { side: 0 | 1 }
 
 // The battlefield is laid out on a 3200 x 2000 sketch and scaled up to the real map size.
-// A fresh layout is generated for every battle. It is always point-symmetric around the centre
-// (whatever one side has, the other has rotated 180 degrees) so neither side has an advantage.
+// A fresh layout is generated for every battle. The river and its crossings are always point-symmetric around the
+// centre. On even maps everything else is too (whatever one side has, the other has rotated 180 degrees); on uneven
+// maps each side's towns, woods, hills and marshes are laid out separately, and fairness is checked by play instead
+// (see fairmaps.ts).
 // The sketch was drawn for a 4800 m long field; the empty ground behind each deployment strip is trimmed off.
 const S = MAP.height / 2000;
 const TRIM = (3200 * S - MAP.width) / 2;
@@ -63,6 +65,9 @@ function replace<T>(target: T[], items: T[]) {
   target.splice(0, target.length, ...items);
 }
 
+/** uneven: lay out each side's half separately (false: mirror one half onto the other). */
+export const MAP_OPTIONS = { uneven: true };
+
 export type MapKind = 'river' | 'open';
 export let mapKind: MapKind = 'river';
 
@@ -96,35 +101,54 @@ export function generateMap(seed: number) {
     ...crossingsNorth.map((c, k) => ({ ...c, ...mirror(c), name: k === 0 ? pick(rng, c.ford ? FORD_NAMES : BRIDGE_NAMES, names) : c.name })),
   ] : []);
 
-  // Objectives: two on each side in mirrored spots, plus the centre (a bridge, or a village on open maps).
-  // Home towns sit well back, so the armies have a march to make before they meet.
-  const a = v(rng.range(650, 1000), rng.range(250, 760));
-  const b = v(rng.range(650, 1000), rng.range(1240, 1750));
+  // Objectives: two home towns on each side, sometimes one or two more towns between them and the centre, plus
+  // the centre itself (a bridge, or a village on open maps). Home towns sit well back, so the armies have a march to
+  // make before they meet. On uneven maps each side's towns are laid out separately, so the two halves differ.
   const kind = (): ObjectiveKind => (rng.next() < 0.5 ? 'village' : 'depot');
-  const kindA = kind();
-  const kindB = rng.next() < 0.7 ? (kindA === 'village' ? 'depot' : 'village') : kindA;
   const label = (k: ObjectiveKind) => pick(rng, k === 'village' ? VILLAGE_NAMES : DEPOT_NAMES, names);
-  // Some maps add one or two more towns between each side's home towns and the centre.
-  const extras: Vec[] = [];
-  const extraCount = [0, 1, 1, 2][Math.floor(rng.next() * 4)];
-  for (let tries = 0; extras.length < extraCount && tries < 200; tries++) {
-    const p = v(rng.range(1050, 1420), rng.range(250, 1750));
-    const river = nearestRiverPoint(p);
-    if (river && (river.d < 260 || riverSide(p) !== -1)) continue;
-    if ([a, b, centre, ...crossingsNorth, ...extras].some((q) => dist(p, q) < 520) || dist(p, mirror(p)) < 900) continue;
-    // Its road to the centre must reach the bridge without clipping a bend of the river first.
-    const toBridge = dist(p, centre) - CROSSING_RADIUS - 10;
-    const nearBridge = { x: p.x + ((centre.x - p.x) / dist(p, centre)) * toBridge, y: p.y + ((centre.y - p.y) / dist(p, centre)) * toBridge };
-    if (RIVER.length && crossesRiver(p, nearBridge)) continue;
-    extras.push(p);
-  }
-  const extraKinds = extras.map(() => (rng.next() < 0.75 ? 'village' : 'depot') as ObjectiveKind);
+  // A side's towns, laid out as if on the west half (the east side's are mirrored over afterwards).
+  // `avoid` holds the other side's extra towns, seen from this side, so the two sets keep apart.
+  // `like`, when given, is the other side's number of extra towns: this side gets the same, or one more or fewer.
+  const townsFor = (avoid: Vec[], like?: number) => {
+    const a = v(rng.range(650, 1000), rng.range(250, 760));
+    const b = v(rng.range(650, 1000), rng.range(1240, 1750));
+    const kindA = kind();
+    const kindB = rng.next() < 0.7 ? (kindA === 'village' ? 'depot' : 'village') : kindA;
+    const extras: Vec[] = [];
+    const roll = Math.floor(rng.next() * 4);
+    const extraCount = like === undefined ? [0, 1, 1, 2][roll] : Math.max(0, Math.min(2, like + [-1, 0, 0, 1][roll]));
+    for (let tries = 0; extras.length < extraCount && tries < 200; tries++) {
+      const p = v(rng.range(1050, 1420), rng.range(250, 1750));
+      const river = nearestRiverPoint(p);
+      if (river && (river.d < 260 || riverSide(p) !== -1)) continue;
+      if ([a, b, centre, ...crossingsNorth, ...extras].some((q) => dist(p, q) < 520) || dist(p, mirror(p)) < 900) continue;
+      if (avoid.some((q) => dist(mirror(p), q) < 520)) continue;
+      // Its road to the centre must reach the bridge without clipping a bend of the river first.
+      const toBridge = dist(p, centre) - CROSSING_RADIUS - 10;
+      const nearBridge = { x: p.x + ((centre.x - p.x) / dist(p, centre)) * toBridge, y: p.y + ((centre.y - p.y) / dist(p, centre)) * toBridge };
+      if (RIVER.length && crossesRiver(p, nearBridge)) continue;
+      extras.push(p);
+    }
+    const extraKinds = extras.map(() => (rng.next() < 0.75 ? 'village' : 'depot') as ObjectiveKind);
+    return { a, b, kindA, kindB, extras, extraKinds };
+  };
+  const W = townsFor([]);
+  const E = MAP_OPTIONS.uneven ? townsFor(W.extras, W.extras.length) : W;
+  const { a, b, extras } = W;
   const west: Omit<ObjectiveDef, 'id'>[] = [
-    { name: label(kindA), kind: kindA, ...a, home: 0 },
-    { name: label(kindB), kind: kindB, ...b, home: 0 },
-    ...extras.map((p, i) => ({ name: label(extraKinds[i]), kind: extraKinds[i], ...p })),
+    { name: label(W.kindA), kind: W.kindA, ...a, home: 0 },
+    { name: label(W.kindB), kind: W.kindB, ...b, home: 0 },
+    ...extras.map((p, i) => ({ name: label(W.extraKinds[i]), kind: W.extraKinds[i], ...p })),
   ];
-  const east = west.map((o) => ({ ...o, ...mirror(o), name: label(o.kind), home: o.home === 0 ? (1 as const) : undefined }));
+  // East towns: aE mirrors E.a, so it lies in the south-east; bE in the north-east.
+  const aE = mirror(E.a);
+  const bE = mirror(E.b);
+  const extrasE = E.extras.map(mirror);
+  const east: Omit<ObjectiveDef, 'id'>[] = [
+    { name: label(E.kindA), kind: E.kindA, ...aE, home: 1 },
+    { name: label(E.kindB), kind: E.kindB, ...bE, home: 1 },
+    ...extrasE.map((p, i) => ({ name: label(E.extraKinds[i]), kind: E.extraKinds[i], ...p })),
+  ];
   // The outer crossing on each half is worth holding too, so the fighting spreads along the river.
   const sideBridge = crossingsNorth[0];
   if (sideBridge) {
@@ -142,45 +166,53 @@ export function generateMap(seed: number) {
 
   // Roads join the objectives through the centre and run back to both map edges, with side roads
   // over the other crossings (or straight across on open maps).
-  const northObj = OBJECTIVES.find((o) => o.home === 1 && o.y === MAP.height - b.y)!;
   const upper = crossingsNorth[0];
   replace(ROADS, [
-    [{ x: 0, y: a.y }, a, centre, mirror(a), { x: MAP.width, y: MAP.height - a.y }],
-    [{ x: 0, y: b.y }, b, centre, mirror(b), { x: MAP.width, y: MAP.height - b.y }],
-    upper ? [a, upper, northObj] : [a, northObj],
-    upper ? [b, mirror(upper), mirror(a)] : [b, mirror(a)],
-    ...extras.flatMap((p) => {
-      const home = dist(p, a) < dist(p, b) ? a : b;
-      return [[home, p, centre], [mirror(home), mirror(p), centre]];
-    }),
+    [{ x: 0, y: a.y }, a, centre, aE, { x: MAP.width, y: aE.y }],
+    [{ x: 0, y: b.y }, b, centre, bE, { x: MAP.width, y: bE.y }],
+    upper ? [a, upper, bE] : [a, bE],
+    upper ? [b, mirror(upper), aE] : [b, aE],
+    ...extras.map((p) => [dist(p, a) < dist(p, b) ? a : b, p, centre]),
+    ...extrasE.map((p) => [dist(p, aE) < dist(p, bE) ? aE : bE, p, centre]),
   ]);
 
-  // Hills, woods and marshes, scattered on the west half and mirrored, clear of objectives and crossings.
+  // Hills, woods and marshes, clear of objectives and crossings. Each is drawn as if on the west half; on even maps
+  // it is placed there and mirrored, on uneven maps each half gets its own, drawn separately.
   replace(HILLS, []);
   replace(WOODS, []);
   replace(MARSHES, []);
-  const clear = (p: Circle) =>
-    p.x > 650 * S - TRIM && p.x < 1520 * S - TRIM &&
+  // p is where it goes; w is the same spot seen from the west half, for the band it must sit in.
+  const clear = (p: Circle, w: Vec) =>
+    w.x > 650 * S - TRIM && w.x < 1520 * S - TRIM &&
     OBJECTIVES.every((o) => dist(p, o) > p.r + VILLAGE_RADIUS + 60) &&
     CROSSINGS.every((k) => dist(p, k) > p.r + 120) &&
     (nearestRiverPoint(p)?.d ?? Infinity) > p.r + 40 &&
     [...WOODS, ...HILLS, ...MARSHES].every((o) => dist(p, o) > p.r + o.r + 40);
-  const scatter = (count: number, minR: number, maxR: number, into: Circle[]) => {
-    const placed: Circle[] = [];
-    for (let tries = 0; placed.length < count && tries < 300; tries++) {
-      const p = c(rng.range(650, 1520), rng.range(150, 1850), rng.range(minR, maxR));
-      if (!clear(p) || dist(p, mirror(p)) < p.r * 2 + 80) continue;
-      placed.push(p);
-      into.push(p, { ...mirror(p), r: p.r });
+  type Core = Circle & { east: boolean };
+  const halves = MAP_OPTIONS.uneven ? [false, true] : [false];
+  const scatter = (count: () => number, minR: number, maxR: number, into: Circle[]): Core[] => {
+    const cores: Core[] = [];
+    for (const east of halves) {
+      const n = count();
+      let placed = 0;
+      for (let tries = 0; placed < n && tries < 300; tries++) {
+        const w = c(rng.range(650, 1520), rng.range(150, 1850), rng.range(minR, maxR));
+        const p = east ? { ...mirror(w), r: w.r } : w;
+        if (!clear(p, w) || dist(w, mirror(w)) < w.r * 2 + 80) continue;
+        placed++;
+        cores.push({ ...w, east });
+        if (MAP_OPTIONS.uneven) into.push(p);
+        else into.push(w, { ...mirror(w), r: w.r });
+      }
     }
+    return cores;
   };
-  scatter(Math.floor(rng.next() * 4), 140, 230, HILLS);
+  scatter(() => Math.floor(rng.next() * 4), 140, 230, HILLS);
   // How wooded the map is varies from a few copses to thick forest.
   const woodland = [[0, 2], [2, 4], [3, 6], [6, 10]][Math.floor(rng.next() * 4)];
-  scatter(woodland[0] + Math.floor(rng.next() * (woodland[1] - woodland[0] + 1)), 70, 150, WOODS);
-  // Give each wood an irregular outline: extra lobes around its core, mirrored like the rest.
-  const addLobes = (list: Circle[], min: number, max: number) => {
-    const cores = list.filter((_, i) => i % 2 === 0);
+  const woods = scatter(() => woodland[0] + Math.floor(rng.next() * (woodland[1] - woodland[0] + 1)), 70, 150, WOODS);
+  // Give each wood an irregular outline: extra lobes around its core, worked out on the west half like the core.
+  const addLobes = (cores: Core[], list: Circle[], min: number, max: number) => {
     for (const core of cores) {
       const lobes = min + Math.floor(rng.next() * (max - min + 1));
       let heading = rng.range(0, Math.PI * 2);
@@ -188,18 +220,20 @@ export function generateMap(seed: number) {
         heading += rng.range(-1.2, 1.2);
         const r = core.r * rng.range(0.45, 0.85);
         const d = core.r * rng.range(0.6, 1.1);
-        const lobe = { x: core.x + Math.cos(heading) * d, y: core.y + Math.sin(heading) * d, r };
-        if (OBJECTIVES.some((o) => dist(lobe, o) < r + VILLAGE_RADIUS + 30) || CROSSINGS.some((k2) => dist(lobe, k2) < r + 90)) continue;
-        if ((nearestRiverPoint(lobe)?.d ?? Infinity) < r + 40) continue;
-        if (lobe.x < 600 * S - TRIM || lobe.x > MAP.width / 2 - r) continue;
-        list.push(lobe, { ...mirror(lobe), r });
+        const w = { x: core.x + Math.cos(heading) * d, y: core.y + Math.sin(heading) * d, r };
+        if (w.x < 600 * S - TRIM || w.x > MAP.width / 2 - r) continue;
+        const lobe = core.east ? { ...mirror(w), r } : w;
+        const both = MAP_OPTIONS.uneven ? [lobe] : [w, { ...mirror(w), r }];
+        if (both.some((q) => OBJECTIVES.some((o) => dist(q, o) < r + VILLAGE_RADIUS + 30) || CROSSINGS.some((k2) => dist(q, k2) < r + 90))) continue;
+        if (both.some((q) => (nearestRiverPoint(q)?.d ?? Infinity) < r + 40)) continue;
+        list.push(...both);
       }
     }
   };
-  addLobes(WOODS, 2, 5);
+  addLobes(woods, WOODS, 2, 5);
   // Marshes vary too: none to several, each a spread of boggy lobes rather than a neat circle.
-  scatter(Math.floor(rng.next() * 4), 70, 140, MARSHES);
-  addLobes(MARSHES, 1, 4);
+  const marshes = scatter(() => Math.floor(rng.next() * 4), 70, 140, MARSHES);
+  addLobes(marshes, MARSHES, 1, 4);
   windRoads(rng);
   bakeTerrain();
 }
