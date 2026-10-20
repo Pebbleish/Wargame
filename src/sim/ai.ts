@@ -164,6 +164,23 @@ export const PARAMS = {
   standLook: 0, // where our troops are fighting a stronger enemy at a town, plays it forward to see whether standing beats giving it up (0 never; 1 won 52%)
   standOdds: 0.8, // looks when the enemy there is at least this share of our strength there
   standFor: 30, // seconds a town given up is left alone
+  together: 0, // regiments sent at a defended town wait short of it until enough have gathered to go in together (0: each goes as it arrives; 1 won 50%)
+  togetherN: 2, // how many
+  mergeAttack: 0, // regiments sent at the town under attack join the attack, with its forming up and gun preparation (0: they march straight in; 1 lost 44%)
+  hunt: 0, // free regiments go after enemy regiments standing on their own, in strength (0 never; 1 lost 42%)
+  huntReach: 1200, // from this far
+  huntOdds: 1.5, // only with at least this many times the regiment's worth
+  trend: 0, // regiments whose morale is falling fast pull back before they reach the rest threshold (0: only below restAt; 1 won 50%)
+  trendDrop: 15, // morale lost in the last 20 seconds that counts as falling fast
+  trendBelow: 60, // only once morale is below this
+  finish: 0, // guns and infantry pile onto wavering enemies to break them (0: no special effort; 1 won 50%)
+  counter: 1, // when an attack on a town we hold stalls, its defenders charge out (0: they hold; 1 won 54% of 960)
+  counterMorale: 45, // stalled: the attackers' average morale is below this
+  scout: 0, // one cavalry regiment scouts places the army has not seen lately (0: none; 1 lost 42%)
+  ammoEarly: 0, // regiments low on ammunition and out of the fight go back to the wagons to refill (0: only once out; 1 won 50%)
+  ammoAt: 40, // low
+  clock: 0, // once the clock is draining morale and the army is well ahead, it stands on the defensive (0: no change; 1 won 52%, same as without)
+  clockLead: 10, // well ahead
 };
 
 // Which battle plan answers which enemy habit, from playing every plan against every other (60 battles a pair):
@@ -274,7 +291,11 @@ export class AI {
   private verdict: { target: number | null; at: number; kind: Look['kind'] } | null = null;
   private fightAt = 0; // next battle time a fight may be looked ahead
   private standAt = 0; // and a stand at a town
-  private abandon = new Map<number, number>(); // towns given up after a look-ahead, until when // what the last look-ahead decided
+  private abandon = new Map<number, number>(); // towns given up after a look-ahead, until when
+  private moraleLog = new Map<number, { t: number; m: number }[]>(); // each regiment's morale over the last 20 seconds
+  private goAt = new Map<number, number>(); // towns whose gathered attackers have been sent in, until when
+  private stageFrom = new Map<number, number>(); // when regiments began gathering short of each town
+  private seenAt = new Map<number, number>(); // when each objective was last in sight // what the last look-ahead decided
   private fixed: number | null | undefined = undefined;
   private bridgeAt = new Map<number, Vec>(); // engineers on their way to bridge the river, and where
   private bridged = false; // this army has thrown its own bridge over the river
@@ -438,8 +459,13 @@ export class AI {
     for (const u of infantry) {
       // Shaken regiments step back to recover before they break.
       const worn = u.meleeWith === null && u.morale < P.restAt;
-      if (worn) this.recovering.add(u.id);
-      else if (u.morale > P.restedAt) this.recovering.delete(u.id);
+      // So do regiments losing a fight fast, and ones low on rounds while nobody is in range to shoot at them.
+      const drop = P.trend > 0 ? this.moraleDrop(world, u) : 0;
+      const falling = P.trend > 0 && u.meleeWith === null && u.morale < P.trendBelow && drop >= P.trendDrop;
+      const dry = P.ammoEarly > 0 && u.meleeWith === null && u.ammo < P.ammoAt
+        && !visibleEnemies.some((e) => e.state !== 'routing' && !isSupport(e) && dist(e, u) < UNIT_TYPES[u.type].range * 1.5);
+      if (worn || falling || dry) this.recovering.add(u.id);
+      else if (u.morale > P.restedAt && (P.ammoEarly <= 0 || u.ammo >= 90)) this.recovering.delete(u.id);
     }
     // One fresh line regiment stays back as a reserve once the army is big enough to spare it.
     const reserve = this.pickReserve(infantry);
@@ -475,6 +501,14 @@ export class AI {
       goalOf.set(u.id, best);
     }
     if (this.front && P.front > 0 && P.frontPull > 0 && this.plan.target !== null) this.pullToAttack(world, infantry, visibleEnemies, goalOf, assigned, spare);
+    // Regiments already marching on the town under attack join the attack rather than going in on their own.
+    if (P.mergeAttack > 0 && this.plan.target !== null) {
+      for (const u of infantry) if (goalOf.get(u.id) === this.plan.target) { this.assault.add(u.id); spare.add(u.id); goalOf.delete(u.id); }
+    }
+    const staging = P.together > 0 ? this.gather(world, mine, infantry, visibleEnemies, goalOf, assigned) : new Set<number>();
+    const hunters = P.hunt > 0 ? this.assignHunters(mine, visibleEnemies, assigned, spare, reserve) : new Map<number, Unit>();
+    const counters = P.counter > 0 ? this.counterAttacks(world, mine, visibleEnemies) : new Map<number, Unit>();
+    if (P.scout > 0) this.watchObjectives(world, mine);
     const assaultOrders = this.plan.target !== null ? this.assaultOrders(world, cmds, mine, visibleEnemies) : new Set<number>();
 
     const helpers = this.assignHelpers(world, mine, visibleEnemies, assigned, spare);
@@ -520,6 +554,10 @@ export class AI {
       }
 
       if (u.type === 'cavalry') {
+        if (P.scout > 0 && u.id === this.scoutId(mine)) {
+          this.scoutOrders(world, cmds, u, mine, visibleEnemies);
+          continue;
+        }
         // Raiders range much further after guns, wagons and the general.
         // Deep raids only go for targets no formed infantry is guarding.
         const reach = this.doctrine.raid ? P.raidReach : P.cavReach;
@@ -532,7 +570,8 @@ export class AI {
             && (dist(u, e) < P.cavReach || !guarded(e)))
           .sort((a, b) => dist(u, a) - (chase(a) ? 400 : 0) - dist(u, b) + (chase(b) ? 400 : 0))[0];
         // Otherwise hit the flank or rear of an enemy already fighting our infantry.
-        const target = prey ?? visibleEnemies
+        const hunted = [...hunters.values()].filter((e) => dist(u, e) < P.cavReach && formationOf(e) !== 'fortified').sort((a, b) => dist(u, a) - dist(u, b))[0];
+        const target = prey ?? hunted ?? visibleEnemies
           .filter((e) => e.state !== 'routing' && !isSupport(e) && formationOf(e) !== 'fortified' && dist(u, e) < 1000
             && mine.some((m) => m.type !== 'cavalry' && !isSupport(m) && dist(m, e) < 350)
             && Math.abs(angleDiff(e.facing, Math.atan2(u.y - e.y, u.x - e.x))) > Math.PI / 3)
@@ -579,6 +618,13 @@ export class AI {
         this.moveIfFar(cmds, u, clampToMap({ x: rear.x + this.dir() * 150, y: rear.y + (this.slot(u.id) % 3 - 1) * 180 }, RULES.borderWidth + 80), 150);
         continue;
       }
+      // Defenders charge out at a stalled attack, and hunters go for an enemy on its own.
+      const charge = counters.get(u.id) ?? hunters.get(u.id);
+      if (charge) {
+        if (u.formation !== 'formation') cmds.push({ kind: 'formation', side: this.side, ids: [u.id], formation: 'formation' });
+        if (u.order.kind !== 'attack' || u.order.target !== charge.id) cmds.push({ kind: 'attack', side: this.side, ids: [u.id], target: charge.id });
+        continue;
+      }
       if (u.id === reserve) {
         this.reserveOrders(cmds, u, mine, visibleEnemies);
         continue;
@@ -612,8 +658,9 @@ export class AI {
         if (u.order.kind !== 'attack') cmds.push({ kind: 'attack', side: this.side, ids: [u.id], target: nearest.id });
         continue;
       }
-      const enemyWeak = nearest && nd < P.pounceRange && (nearest.state === 'wavering' || (u.morale > 65 && nearest.morale < u.morale - P.pounceGap));
-      if (u.type === 'line' && enemyWeak && nearest) {
+      const finishing = P.finish > 0 && nearest?.state === 'wavering';
+      const enemyWeak = nearest && nd < P.pounceRange * (finishing ? 1.6 : 1) && (nearest.state === 'wavering' || (u.morale > 65 && nearest.morale < u.morale - P.pounceGap));
+      if ((u.type === 'line' || (finishing && u.type === 'light')) && enemyWeak && nearest) {
         if (u.formation !== 'formation') cmds.push({ kind: 'formation', side: this.side, ids: [u.id], formation: 'formation' });
         if (u.order.kind !== 'attack') cmds.push({ kind: 'attack', side: this.side, ids: [u.id], target: nearest.id });
         continue;
@@ -636,7 +683,7 @@ export class AI {
       const atGoal = dist(u, goal) < 250;
       const cavThreat = visibleEnemies.some((e) => e.type === 'cavalry' && e.state === 'ok' && dist(e, u) < 300);
       // Troops already in a fight cannot start digging in, so only ask when the order will be accepted.
-      const wanted = atGoal && (nd < this.doctrine.fortifyAt * P.fortifyScale || cavThreat) && (u.formation === 'fortified' || world.canFortify(u)) ? 'fortified' : 'formation';
+      const wanted = !staging.has(u.id) && atGoal && (nd < this.doctrine.fortifyAt * P.fortifyScale || cavThreat) && (u.formation === 'fortified' || world.canFortify(u)) ? 'fortified' : 'formation';
       if (u.formation !== wanted) cmds.push({ kind: 'formation', side: this.side, ids: [u.id], formation: wanted });
       // Stand in the best cover at the objective, spread out from the others. While shells fall on it and no
       // enemy foot is near enough to rush it, step back out of the fire to cover nearby.
@@ -649,6 +696,134 @@ export class AI {
     }
     for (const id of this.spots.keys()) if (!stood.has(id)) this.spots.delete(id);
     return cmds;
+  }
+
+  /** How much a regiment's morale has fallen from its best in the last 20 seconds. */
+  private moraleDrop(world: World, u: Unit): number {
+    const log = this.moraleLog.get(u.id) ?? [];
+    log.push({ t: world.time, m: u.morale });
+    while (log.length && world.time - log[0].t > 20) log.shift();
+    this.moraleLog.set(u.id, log);
+    return Math.max(...log.map((s) => s.m)) - u.morale;
+  }
+
+  /**
+   * Regiments sent at a defended town wait together short of it until enough have arrived to go in at once (or a
+   * minute has passed), rather than walking in one at a time. Returns the regiments told to wait.
+   */
+  private gather(world: World, mine: Unit[], infantry: Unit[], enemies: Unit[], goalOf: Map<number, number>, assigned: Map<number, Vec>): Set<number> {
+    const staging = new Set<number>();
+    const anchor = this.frontAnchor(mine);
+    const groups = new Map<number, Unit[]>();
+    for (const u of infantry) {
+      const g = goalOf.get(u.id);
+      if (g === undefined) continue;
+      if (!groups.has(g)) groups.set(g, []);
+      groups.get(g)!.push(u);
+    }
+    for (const [i, group] of groups) {
+      const o = OBJECTIVES[i];
+      const defended = enemies.some((e) => e.state !== 'routing' && !isSupport(e) && dist(e, o) < 600);
+      if (world.owners[i] === this.side || group.length < 2 || !defended || (this.goAt.get(i) ?? -1) > world.time) { this.stageFrom.delete(i); continue; }
+      const d = dist(anchor, o) || 1;
+      const stage = clampToMap({ x: o.x + ((anchor.x - o.x) / d) * 650, y: o.y + ((anchor.y - o.y) / d) * 650 }, RULES.borderWidth + 100);
+      const want = Math.min(group.length, Math.round(this.params.togetherN));
+      const ready = group.filter((u) => dist(u, stage) < 300 || dist(u, o) < 450).length;
+      if (!this.stageFrom.has(i)) this.stageFrom.set(i, world.time);
+      if (ready >= want || world.time - this.stageFrom.get(i)! > 60) {
+        this.goAt.set(i, world.time + 60);
+        this.stageFrom.delete(i);
+        continue;
+      }
+      for (const u of group) if (dist(u, o) >= 450) { assigned.set(u.id, stage); staging.add(u.id); }
+    }
+    return staging;
+  }
+
+  /**
+   * Enemy regiments standing on their own (no other enemy within 500 m, not dug in, not in a town of theirs) are
+   * hunted by the nearest free regiments, up to three, when together they are worth enough more than it.
+   */
+  private assignHunters(mine: Unit[], enemies: Unit[], assigned: Map<number, Vec>, spare: Set<number>, reserve: number | null): Map<number, Unit> {
+    const P = this.params;
+    const hunters = new Map<number, Unit>();
+    const lone = enemies.filter((e) => e.state !== 'routing' && !isSupport(e) && e.type !== 'cavalry' && formationOf(e) !== 'fortified'
+      && !enemies.some((o) => o !== e && o.state !== 'routing' && !isSupport(o) && dist(o, e) < 500));
+    const canGo = (m: Unit) => {
+      if (spare.has(m.id) && !this.assault.has(m.id)) return true;
+      const goal = assigned.get(m.id);
+      return !!goal && mine.some((o) => o.id !== m.id && (o.type === 'line' || o.type === 'light') && dist(o, goal) < 300);
+    };
+    const free = mine.filter((m) => (m.type === 'line' || m.type === 'light') && m.morale > 65 && m.meleeWith === null
+      && !this.recovering.has(m.id) && m.id !== reserve && !this.assault.has(m.id) && canGo(m));
+    for (const e of lone.sort((a, b) => this.value(a) - this.value(b))) {
+      const near = free.filter((m) => !hunters.has(m.id) && dist(m, e) < P.huntReach).sort((a, b) => dist(a, e) - dist(b, e)).slice(0, 3);
+      let worth = 0;
+      const team: Unit[] = [];
+      for (const m of near) {
+        if (worth >= this.value(e) * P.huntOdds) break;
+        team.push(m);
+        worth += this.value(m);
+      }
+      if (worth < this.value(e) * P.huntOdds) continue;
+      for (const m of team) hunters.set(m.id, e);
+    }
+    return hunters;
+  }
+
+  /** At a town we hold, when the enemy attacking it is shaken and we are a match for it, the defenders charge out. */
+  private counterAttacks(world: World, mine: Unit[], enemies: Unit[]): Map<number, Unit> {
+    const out = new Map<number, Unit>();
+    OBJECTIVES.forEach((o, i) => {
+      if (world.owners[i] !== this.side) return;
+      const foes = enemies.filter((e) => e.state !== 'routing' && !isSupport(e) && dist(e, o) < 600);
+      if (!foes.length) return;
+      const morale = foes.reduce((a, e) => a + e.morale, 0) / foes.length;
+      const ours = mine.filter((m) => (m.type === 'line' || m.type === 'light') && m.meleeWith === null && m.morale > 50 && !this.recovering.has(m.id) && dist(m, o) < 600);
+      const worth = ours.reduce((a, m) => a + this.value(m), 0);
+      if (morale >= this.params.counterMorale || worth < foes.reduce((a, e) => a + this.value(e), 0) * 0.8) return;
+      for (const m of ours) out.set(m.id, this.nearest(m, foes)!);
+    });
+    return out;
+  }
+
+  /** Note which objectives our troops can see. */
+  private watchObjectives(world: World, mine: Unit[]) {
+    OBJECTIVES.forEach((o, i) => {
+      if (mine.some((m) => dist(m, o) < UNIT_TYPES[m.type].sight * 0.8)) this.seenAt.set(i, world.time);
+    });
+  }
+
+  /** The scout: the first cavalry regiment, once there are two or more. */
+  private scoutId(mine: Unit[]): number | null {
+    const cav = mine.filter((m) => m.type === 'cavalry').sort((a, b) => a.id - b.id);
+    return cav.length >= 2 ? cav[0].id : null;
+  }
+
+  /** The scout rides to within sight of the place not ours that has gone unseen longest, and backs off from danger. */
+  private scoutOrders(world: World, cmds: Command[], u: Unit, mine: Unit[], enemies: Unit[]) {
+    const danger = enemies.find((e) => e.state !== 'routing' && !isSupport(e) && e.type !== 'artillery' && dist(e, u) < 600);
+    if (danger) {
+      const d = dist(danger, u) || 1;
+      this.moveIfFar(cmds, u, clampToMap({ x: u.x + ((u.x - danger.x) / d) * 500, y: u.y + ((u.y - danger.y) / d) * 500 }, RULES.borderWidth + 80), 100);
+      return;
+    }
+    let best = -1;
+    let oldest = Infinity;
+    OBJECTIVES.forEach((o, i) => {
+      if (world.owners[i] === this.side) return;
+      const t = (this.seenAt.get(i) ?? -999) + dist(u, o) / 100;
+      if (t < oldest) { oldest = t; best = i; }
+    });
+    if (best < 0) {
+      const anchor = this.frontAnchor(mine);
+      this.moveIfFar(cmds, u, { x: anchor.x - this.dir() * 250, y: anchor.y });
+      return;
+    }
+    const o = OBJECTIVES[best];
+    const d = dist(u, o) || 1;
+    const spot = d > 900 ? { x: o.x + ((u.x - o.x) / d) * 900, y: o.y + ((u.y - o.y) / d) * 900 } : { x: u.x, y: u.y };
+    this.moveIfFar(cmds, u, clampToMap(spot, RULES.borderWidth + 80), 150);
   }
 
   /**
@@ -939,7 +1114,8 @@ export class AI {
       const fortified = formationOf(e) === 'fortified' ? 1 : 0;
       // Before and during an attack, the guns work on the defenders of the objective.
       const prep = this.plan.target !== null && dist(e, OBJECTIVES[this.plan.target]) < 600 ? this.params.gunPrep : 0;
-      const score = crowd + attacking + fortified + prep - friends * 2 - (d > range ? 1.5 : 0);
+      const shaky = this.params.finish > 0 && (e.state === 'wavering' || e.morale < 45) ? 3 : 0;
+      const score = crowd + attacking + fortified + prep + shaky - friends * 2 - (d > range ? 1.5 : 0);
       if (score > bestScore) { bestScore = score; best = e; }
     }
     this.gunSpots.delete(u.id);
@@ -1135,6 +1311,8 @@ export class AI {
     if (ratio > P.attackRatio || me.armyMorale > them.armyMorale + P.moraleLead || (ratio > 0.8 && (heldByThem > heldByUs || (late && losing)))) p.posture = 'attack';
     else if (ratio < P.defendRatio && !(late && losing)) p.posture = 'defend';
     else p.posture = 'hold';
+    // With the clock draining both armies, a side well ahead only has to hold on.
+    if (P.clock > 0 && world.time > RULES.timePressureAt && me.armyMorale > them.armyMorale + P.clockLead) p.posture = 'defend';
 
     if (p.posture === 'defend') {
       if (p.target !== null) this.endAttack(world, true);
