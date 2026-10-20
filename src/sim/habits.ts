@@ -13,9 +13,11 @@ export interface Habits {
   dugIn: number; // share of infantry time spent fortified
   centreRush: number; // how often they mass on the centre in the opening minutes
   raids: number; // share of cavalry time spent deep in the enemy's half
+  north: number; // share of their forward infantry time spent in the northern third of the field
+  south: number; // and in the southern third
 }
 
-export const NO_HABITS: Habits = { battles: 0, guns: 0, cavalry: 0, dugIn: 0, centreRush: 0, raids: 0 };
+export const NO_HABITS: Habits = { battles: 0, guns: 0, cavalry: 0, dugIn: 0, centreRush: 0, raids: 0, north: 0, south: 0 };
 
 /** Watches one side through a battle and sums up how it fought. */
 export class HabitWatcher {
@@ -28,6 +30,7 @@ export class HabitWatcher {
   private horse = 0;
   private deep = 0;
   private rushed = false;
+  private bands = [0, 0, 0]; // forward infantry seen in each third of the field, north to south
   private next = 0;
 
   constructor(readonly side: Side) {}
@@ -54,6 +57,9 @@ export class HabitWatcher {
         this.foot++;
         if (formationOf(u) === 'fortified') this.dug++;
         if (centre && dist(u, centre) < 600) atCentre++;
+        // Forward: past the first two fifths of the field from their own edge, where they are attacking.
+        const forward = this.side === 0 ? u.x > MAP.width * 0.4 : u.x < MAP.width * 0.6;
+        if (forward) this.bands[Math.min(2, Math.floor((u.y / MAP.height) * 3))]++;
       }
       if (u.type === 'cavalry') {
         this.horse++;
@@ -75,7 +81,13 @@ export class HabitWatcher {
       dugIn: this.foot ? this.dug / this.foot : 0,
       centreRush: this.rushed ? 1 : 0,
       raids: this.horse ? this.deep / this.horse : 0,
+      ...this.flanks(),
     };
+  }
+
+  private flanks() {
+    const n = this.bands[0] + this.bands[1] + this.bands[2];
+    return { north: n ? this.bands[0] / n : 0, south: n ? this.bands[2] / n : 0 };
   }
 }
 
@@ -90,6 +102,8 @@ export function mergeHabits(h: Habits, battle: Habits): Habits {
     dugIn: mix(h.dugIn, battle.dugIn),
     centreRush: mix(h.centreRush, battle.centreRush),
     raids: mix(h.raids, battle.raids),
+    north: mix(h.north, battle.north),
+    south: mix(h.south, battle.south),
   };
 }
 

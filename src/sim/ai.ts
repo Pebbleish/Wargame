@@ -1,6 +1,7 @@
 import { MAP, RULES, UNIT_TYPES, UnitTypeId } from './config';
 import { CROSSINGS, EARTHWORKS, OBJECTIVES, RIVER, Terrain, Vec, clampToMap, crossesRiver, dist, nearestRiverPoint, riverSide, terrainAt } from './map';
 import { Habits } from './habits';
+import { whatIf, winChance } from './value';
 import { Command, Side, Unit, World, angleDiff, formationOf, isSupport } from './world';
 
 type Posture = 'attack' | 'hold' | 'defend';
@@ -45,7 +46,7 @@ export interface Doctrine {
 
 export const DOCTRINES: Doctrine[] = [
   {
-    name: 'Fortress', report: 'Scouts report the enemy digging in around its towns, with guns behind.',
+    name: 'Fortress', report: 'Scouts report the enemy advancing slowly, its guns close behind its infantry.',
     deploy: ['line', 'artillery', 'artillery'], cavalry: 2, artilleryEvery: 4, lightEvery: 5,
     attack: 'late', wing: false, fortifyAt: 1200, reserve: true, raid: false,
   },
@@ -77,7 +78,9 @@ export const DOCTRINES: Doctrine[] = [
  * kept only when they won at least 54% of 120 confirming battles. Re-tuned after the rally, comeback, river and
  * garrison changes (three changes kept out of twenty rounds). Then re-tuned with bigger self-play: each change
  * screened on 80 battles, kept only after winning at least 53.5% of 320 more and doing no worse against three
- * earlier AIs (one change kept out of ten rounds).
+ * earlier AIs (one change kept out of ten rounds). Round 9 measured it against scripted sparring partners that fight
+ * the way people do (sparring.ts), found it lost three battles in four to a player massing everything on one flank,
+ * and turned the infantry into one body (`mass`), which beats the round 8 AI 79% of the time.
  */
 export const PARAMS = {
   ground: 0, // weight on cover and high ground when garrisons pick where to stand (0 ignores the ground)
@@ -183,6 +186,23 @@ export const PARAMS = {
   clockLead: 10, // well ahead
   bombardWait: 0, // while the guns prepare an attack, the infantry waits out of musket range instead of trading volleys (0: closes to fire; with merged attacks 41%)
   storm: 0, // once the assault goes in, every regiment charges home (0: only when the defender is shaken or heavily outnumbered; with merged attacks 42%)
+  relieve: 0, // a worn regiment holding a post is swapped for a fresh spare one before it breaks (0: it stays until restAt; 1 won 53% before the massed army, which has no posts)
+  relieveAt: 55, // worn: morale below this, or ammunition below a third
+  relieveReach: 1500, // the fresh regiment must be within this of the post
+  counterBuy: 0, // reinforcements answer what the enemy fields: guns against works, horse against guns, line against horse (0: the plan's fixed rhythm; 1 won 49%)
+  push: 0, // from pushAt, unless clearly winning, the army commits everything to taking towns (0: only the usual late-and-losing attack; 1 won 51% before the massed army)
+  pushAt: 540, // battle time of the big push
+  pushLead: 10, // clearly winning: this far ahead on army morale and not behind on points
+  judge: 0, // weighs choices with the win-chance model: guards a likely win, gambles on a likely loss, attacks where it moves the odds most (0: rules of thumb; 1 won 52%, and 48% with the massed army)
+  safeAbove: 0.7, // a likely win: no set-piece attacks
+  gambleBelow: 0.4, // a likely loss: attack wherever it can
+  commander: 0, // a town under attack asks for as many regiments as it takes to match the enemy there, not at most two more (0: by headcount, capped; 1 won 53% before the massed army)
+  holdRatio: 1.2, // how much of the enemy strength near a town its defenders should match
+  mass: 1, // the infantry fights as one body: no garrisons, takes towns one at a time and attacks whatever stands in its way (0: garrisons and spare regiments; 1 won 79% of 480 against them)
+  massReach: 450, // the body attacks enemies this close to any of its regiments (450 won 53% of 960 against 300)
+  massDefend: 0, // the body turns back to save a town of ours under attack by a strong enemy force it can reach (0: it only retakes towns once lost; 1 lost 37%)
+  massRest: 0, // in the body, a worn regiment steps back behind it to recover while the others fight (0: everyone fights on; 1 lost 46%)
+  habitFlank: 0, // learns which flank the enemy attacks on, in this battle and earlier ones, and waits for it there (0: no; 1 won 51%, and gained nothing against a player who always attacks on one flank)
 };
 
 // Which battle plan answers which enemy habit, from playing every plan against every other (60 battles a pair):
@@ -257,9 +277,10 @@ interface Shell {
 
 /**
  * A layered AI. A commander reviews the battle every few seconds and settles the army's posture and which
- * objective to attack. Regiments are then given roles (garrison, assault group, reserve, recovering), and
- * each role turns into orders through the same commands a human player uses. It only knows about enemies
- * its own troops have seen.
+ * objective to attack. With `mass` on (the default) the infantry moves and fights as one body, town by town;
+ * otherwise regiments are given roles (garrison, assault group, reserve, recovering). Guns, horse, engineers,
+ * the general and the wagons keep their own roles either way, and every role turns into orders through the
+ * same commands a human player uses. It only knows about enemies its own troops have seen.
  */
 export class AI {
   private lastThink = -999;
@@ -297,6 +318,11 @@ export class AI {
   private moraleLog = new Map<number, { t: number; m: number }[]>(); // each regiment's morale over the last 20 seconds
   private goAt = new Map<number, number>(); // towns whose gathered attackers have been sent in, until when
   private stageFrom = new Map<number, number>(); // when regiments began gathering short of each town
+  private pressure = [0, 0, 0]; // enemy regiment-seconds seen in our half in each third of the field, north to south
+  private massTarget: number | null = null; // the town the massed infantry is going for
+  private massAt = -999;
+  private pushing = false; // the army is making its big push
+  private seenMax = { guns: 0, horse: 0 }; // most enemy batteries and cavalry regiments known of at once
   private seenAt = new Map<number, number>(); // when each objective was last in sight // what the last look-ahead decided
   private fixed: number | null | undefined = undefined;
   private bridgeAt = new Map<number, Vec>(); // engineers on their way to bridge the river, and where
@@ -312,6 +338,12 @@ export class AI {
     this.params = { ...PARAMS, ...opts.params };
     this.doctrine = opts.doctrine ?? DOCTRINES[this.choosePlan(h, opts.habits)];
     this.wingSign = (h & 1) ? 1 : -1;
+    // What earlier battles say about where this enemy attacks counts as a minute of watching three regiments there.
+    const hb = opts.habits;
+    if (hb && hb.battles > 0 && hb.north + hb.south > 0) {
+      const w = 180 * Math.min(1, hb.battles / 3);
+      this.pressure = [hb.north * w, Math.max(0, 1 - hb.north - hb.south) * w, hb.south * w];
+    }
   }
 
   /**
@@ -376,6 +408,23 @@ export class AI {
     return [...this.orders(world), ...this.reinforce(world)];
   }
 
+  /** What this side knows of the battle as numbers, for the win-chance model in value.ts. */
+  features(world: World): number[] {
+    const me = world.sides[this.side];
+    const them = world.sides[1 - this.side];
+    let ours = 0;
+    for (const u of world.units) if (u.side === this.side && u.state !== 'routing') ours += this.value(u);
+    let theirs = 0;
+    for (const s of this.memory.values()) theirs += s.value;
+    const t = world.time / RULES.matchLength;
+    const md = (me.armyMorale - them.armyMorale) / 100;
+    const held = (world.owners.filter((o) => o === this.side).length - world.owners.filter((o) => o === 1 - this.side).length) / 3;
+    const ratio = Math.log((ours + 500) / (theirs + 500));
+    const mm = me.armyMorale / 100 - 0.5;
+    const tm = them.armyMorale / 100 - 0.5;
+    return [md, md * t, held, held * t, (me.score - them.score) / 5, ratio, ratio * t, mm * t, tm * t, me.manpower / 1000];
+  }
+
   private homeX(offset: number): number {
     return this.side === 0 ? offset : MAP.width - offset;
   }
@@ -409,11 +458,19 @@ export class AI {
           && (dist(u, o) < reach || (o.home === this.side && u.type === 'cavalry' && dist(u, o) < this.params.horseAlert)));
         need = threat ? 1 : 0;
       }
-      need += Math.min(this.params.needCap, enemyNear);
+      if (this.params.commander > 0 && enemyNear > 0 && (owned || world.owners[i] === -1)) {
+        // Match the enemy's strength there, in regiments of our average worth, rather than count heads.
+        need += Math.ceil((this.enemyPowerNear(o, 700) * this.params.holdRatio) / this.avgWorth(world));
+      } else need += Math.min(this.params.needCap, enemyNear);
       if (owned && this.plan.posture === 'defend' && enemyNear > 0) need += 1;
       if ((this.abandon.get(i) ?? -1) > world.time) need = 0;
       return { pos: { x: o.x, y: o.y }, need };
     });
+    // The town this enemy is likely to come for keeps one more regiment than it otherwise would.
+    if (this.params.habitFlank > 0) {
+      const e = this.expectedTown(world);
+      if (e !== null && (this.abandon.get(e) ?? -1) <= world.time) needs[e].need += 1;
+    }
     // Rather than send troops at every place the enemy holds at once, go for the few most worth it, in strength.
     const n = this.params.focusTargets;
     if (n > 0) {
@@ -439,6 +496,7 @@ export class AI {
     const mine = world.units.filter((u) => u.side === this.side && u.state !== 'routing');
     const visibleEnemies = world.units.filter((u) => u.side !== this.side && u.seen[this.side]);
     this.remember(world, mine, visibleEnemies);
+    if (P.habitFlank > 0) this.notePressure(world);
     this.watchShells(world);
     this.adapt(world, visibleEnemies);
     // A minute in, the other side's scouts work out what kind of battle this army is fighting.
@@ -467,7 +525,7 @@ export class AI {
       const dry = P.ammoEarly > 0 && u.meleeWith === null && u.ammo < P.ammoAt
         && !visibleEnemies.some((e) => e.state !== 'routing' && !isSupport(e) && dist(e, u) < UNIT_TYPES[u.type].range * 1.5);
       if (worn || falling || dry) this.recovering.add(u.id);
-      else if (u.morale > P.restedAt && (P.ammoEarly <= 0 || u.ammo >= 90)) this.recovering.delete(u.id);
+      else if (u.morale > P.restedAt && (P.ammoEarly <= 0 || u.ammo >= 90) && (P.relieve <= 0 || u.ammo >= 60)) this.recovering.delete(u.id);
     }
     // One fresh line regiment stays back as a reserve once the army is big enough to spare it.
     const reserve = this.pickReserve(infantry);
@@ -502,6 +560,7 @@ export class AI {
       this.lastGoal.set(u.id, best);
       goalOf.set(u.id, best);
     }
+    if (P.relieve > 0) this.relieveWorn(infantry, goalOf, assigned, spare, needs);
     if (this.front && P.front > 0 && P.frontPull > 0 && this.plan.target !== null) this.pullToAttack(world, infantry, visibleEnemies, goalOf, assigned, spare);
     // Regiments already marching on the town under attack join the attack rather than going in on their own.
     if (P.mergeAttack > 0 && this.plan.target !== null) {
@@ -511,7 +570,8 @@ export class AI {
     const hunters = P.hunt > 0 ? this.assignHunters(mine, visibleEnemies, assigned, spare, reserve) : new Map<number, Unit>();
     const counters = P.counter > 0 ? this.counterAttacks(world, mine, visibleEnemies) : new Map<number, Unit>();
     if (P.scout > 0) this.watchObjectives(world, mine);
-    const assaultOrders = this.plan.target !== null ? this.assaultOrders(world, cmds, mine, visibleEnemies) : new Set<number>();
+    const assaultOrders = P.mass > 0 ? this.massOrders(world, cmds, mine, visibleEnemies)
+      : this.plan.target !== null ? this.assaultOrders(world, cmds, mine, visibleEnemies) : new Set<number>();
 
     const helpers = this.assignHelpers(world, mine, visibleEnemies, assigned, spare);
     // Spare regiments that could press home, by the enemy each would go for: with group pressing, an enemy is only
@@ -628,7 +688,7 @@ export class AI {
         continue;
       }
       if (u.id === reserve) {
-        this.reserveOrders(cmds, u, mine, visibleEnemies);
+        this.reserveOrders(world, cmds, u, mine, visibleEnemies);
         continue;
       }
       // Back-line troops go to the help of regiments under attack, firing into the attacker's flank.
@@ -698,6 +758,31 @@ export class AI {
     }
     for (const id of this.spots.keys()) if (!stood.has(id)) this.spots.delete(id);
     return cmds;
+  }
+
+  /**
+   * Relief in place: a worn regiment holding a post hands it to a fresh spare regiment and falls back to recover,
+   * rather than staying until it breaks. Destroyed regiments cost army morale for good; worn ones recover.
+   */
+  private relieveWorn(infantry: Unit[], goalOf: Map<number, number>, assigned: Map<number, Vec>, spare: Set<number>, needs: { pos: Vec }[]) {
+    const P = this.params;
+    const fresh = infantry.filter((u) => spare.has(u.id) && !this.assault.has(u.id) && u.meleeWith === null && u.morale > P.restedAt && u.ammo > 60 && u.fatigue < 60);
+    if (!fresh.length) return;
+    for (const u of infantry) {
+      const post = goalOf.get(u.id);
+      if (post === undefined || u.meleeWith !== null || (u.morale >= P.relieveAt && u.ammo >= 33)) continue;
+      const at = needs[post].pos;
+      const f = fresh.filter((m) => dist(m, at) < P.relieveReach).sort((a, b) => dist(a, at) - dist(b, at))[0];
+      if (!f) continue;
+      fresh.splice(fresh.indexOf(f), 1);
+      spare.delete(f.id);
+      assigned.set(f.id, at);
+      goalOf.set(f.id, post);
+      this.lastGoal.set(f.id, post);
+      goalOf.delete(u.id);
+      this.recovering.add(u.id);
+      if (!fresh.length) return;
+    }
   }
 
   /** How much a regiment's morale has fallen from its best in the last 20 seconds. */
@@ -1063,7 +1148,128 @@ export class AI {
       const score = near + (world.owners[i] === this.side ? 0 : 1);
       if (near > 0 && score > bestScore) { bestScore = score; best = o; }
     });
+    // Quiet everywhere: wait where this enemy tends to come.
+    if (bestScore === 0 && this.params.habitFlank > 0) {
+      const i = this.expectedTown(world);
+      if (i !== null) return OBJECTIVES[i];
+    }
     return best;
+  }
+
+  /** The third of the field this enemy keeps attacking in, if one stands out. */
+  private favouredBand(): number | null {
+    const total = this.pressure[0] + this.pressure[1] + this.pressure[2];
+    if (total < 60) return null;
+    const b = this.pressure.indexOf(Math.max(...this.pressure));
+    return this.pressure[b] / total > 0.45 ? b : null;
+  }
+
+  /** Our town furthest forward in that third, which the enemy will reach first. */
+  private expectedTown(world: World): number | null {
+    const b = this.favouredBand();
+    if (b === null) return null;
+    let best: number | null = null;
+    OBJECTIVES.forEach((o, i) => {
+      if (world.owners[i] !== this.side || sectorOf(o) !== b) return;
+      if (best === null || (o.x - OBJECTIVES[best].x) * this.dir() > 0) best = i;
+    });
+    return best;
+  }
+
+  /**
+   * The infantry as one body. Rather than spread over the towns in garrisons that can be beaten one at a time, the
+   * whole of it goes for one town at a time, the best worth for the defence it would meet, and every regiment
+   * attacks whatever enemy comes within reach of it on the way.
+   */
+  private massOrders(world: World, cmds: Command[], mine: Unit[], enemies: Unit[]): Set<number> {
+    const P = this.params;
+    const foot = mine.filter((u) => u.type === 'line' || u.type === 'light').sort((a, b) => a.id - b.id);
+    const handled = new Set<number>();
+    if (!foot.length) return handled;
+    const at = this.groupCentre(foot);
+    const t = this.massTarget;
+    const done = t !== null && world.owners[t] === this.side && this.enemyPowerNear(OBJECTIVES[t], 400) === 0;
+    if (t === null || done || world.time - this.massAt > 10) {
+      this.massAt = world.time;
+      let best: number | null = null;
+      let bestScore = -Infinity;
+      const feats = P.judge > 0 ? this.features(world) : null;
+      const strength = foot.reduce((a, u) => a + this.value(u), 0);
+      const expected = P.habitFlank > 0 ? this.expectedTown(world) : null;
+      OBJECTIVES.forEach((o, i) => {
+        if (world.owners[i] === this.side) {
+          // One of ours under attack by a real force, near enough to reach in time: go and save it.
+          const threat = this.enemyPowerNear(o, 700) + (i === expected ? this.enemyPowerNear(o, 1400) * 0.5 : 0);
+          if (P.massDefend <= 0 || threat < strength * 0.3 || dist(at, o) > 1600) return;
+          const score = ((o.home === this.side ? 2.5 : 1.3) * 1000) / 400 * (i === t ? 1.3 : 1) - dist(at, o) * 0.5;
+          if (score > bestScore) { bestScore = score; best = i; }
+          return;
+        }
+        const worth = (o.home === this.side ? 2.5 : 1) * (world.owners[i] === 1 - this.side ? 1.3 : 1) * (o.centre ? 1.3 : o.kind === 'depot' ? 1.1 : 1);
+        let score = (worth * 1000) / (this.enemyPowerNear(o, 600) + 400) * (i === t && !done ? 1.3 : 1) - dist(at, o) * 0.5;
+        if (P.judge > 0) {
+          // How much taking it would move our chance of winning, times the chance of taking it, less the march.
+          const f = feats!;
+          const fromThem = world.owners[i] === 1 - this.side;
+          const strike = foot.reduce((a, u) => a + this.value(u), 0);
+          const defence = this.enemyPowerNear(o, 600);
+          const gain = winChance(whatIf(f, world.time / RULES.matchLength, fromThem ? 2 : 1, fromThem ? RULES.recaptureMorale : 0, 0)) - winChance(f);
+          score = gain * (o.home === this.side ? 2 : 1) * strike / (strike + defence * 1.5 + 1) * (i === t && !done ? 1.3 : 1) - dist(at, o) / 100000;
+        }
+        if (score > bestScore) { bestScore = score; best = i; }
+      });
+      // Everything is ours: stand at the town the enemy is pressing hardest.
+      if (best === null) {
+        let threat = -1;
+        OBJECTIVES.forEach((o, i) => {
+          const v = this.enemyPowerNear(o, 1000) - dist(at, o) * 0.05;
+          if (v > threat) { threat = v; best = i; }
+        });
+      }
+      this.massTarget = best;
+    }
+    if (this.massTarget === null) return handled;
+    const goal = OBJECTIVES[this.massTarget];
+    foot.forEach((u, n) => {
+      handled.add(u.id);
+      if (u.meleeWith !== null) return;
+      if (P.massRest > 0) {
+        if (u.morale < P.restAt || u.ammo < 25) this.recovering.add(u.id);
+        else if (u.morale > P.restedAt && u.ammo > 60) this.recovering.delete(u.id);
+        if (this.recovering.has(u.id)) {
+          // Behind the body, towards the wagons, out of the fight.
+          const wagons = mine.find((m) => m.type === 'supply');
+          const back = wagons ? { x: (wagons.x + at.x) / 2, y: (wagons.y + at.y) / 2 } : { x: at.x - this.dir() * 400, y: at.y };
+          if (u.formation === 'fortified') cmds.push({ kind: 'formation', side: this.side, ids: [u.id], formation: 'formation' });
+          this.moveIfFar(cmds, u, clampToMap(back, RULES.borderWidth + 80), 120);
+          return;
+        }
+      }
+      if (u.formation === 'fortified') cmds.push({ kind: 'formation', side: this.side, ids: [u.id], formation: 'formation' });
+      const foe = enemies.filter((e) => e.state !== 'routing' && !isSupport(e) && dist(e, u) < P.massReach).sort((a, b) => dist(a, u) - dist(b, u))[0];
+      if (foe) {
+        if (u.order.kind !== 'attack' || u.order.target !== foe.id) cmds.push({ kind: 'attack', side: this.side, ids: [u.id], target: foe.id });
+        return;
+      }
+      const p = clampToMap({ x: goal.x + ((n * 37) % 160) - 80, y: goal.y + ((n * 53) % 200) - 100 }, RULES.borderWidth + 80);
+      this.moveIfFar(cmds, u, p, 120);
+    });
+    return handled;
+  }
+
+  /** What one of our infantry regiments is worth on average right now. */
+  private avgWorth(world: World): number {
+    const foot = world.units.filter((u) => u.side === this.side && (u.type === 'line' || u.type === 'light') && u.state !== 'routing');
+    return Math.max(80, foot.reduce((a, u) => a + this.value(u), 0) / Math.max(1, foot.length));
+  }
+
+  /** Tally where enemy troops are seen in our half of the field. */
+  private notePressure(world: World) {
+    for (const u of world.units) {
+      if (u.side === this.side || !u.seen[this.side] || u.state === 'routing' || isSupport(u) || u.type === 'artillery') continue;
+      const inOurHalf = this.side === 0 ? u.x < MAP.width * 0.6 : u.x > MAP.width * 0.4;
+      if (inOurHalf) this.pressure[sectorOf(u)] += 2;
+    }
   }
 
   /** A firing spot off the flank of an enemy that our troops are already engaging, if there is one nearby. */
@@ -1196,6 +1402,7 @@ export class AI {
     const d = this.doctrine;
     const gunEvery = Math.max(1, Math.round(d.artilleryEvery * this.params.gunEvery));
     const lightEvery = Math.max(2, Math.round(d.lightEvery * this.params.lightEvery));
+    if (this.params.counterBuy > 0) prefs.push(...this.counterBuys(world, count));
     if (this.calls % gunEvery === gunEvery - 1) prefs.push('artillery');
     if (count('cavalry') < d.cavalry) prefs.push('cavalry');
     if (this.calls % lightEvery === 1) prefs.push('light');
@@ -1220,6 +1427,24 @@ export class AI {
     const y = Math.max(100, Math.min(MAP.height - 100, towards));
     cmds.push({ kind: 'callIn', side: this.side, type: wanted, x: this.homeX(RULES.zoneStart + RULES.zoneDepth - 150), y });
     return cmds;
+  }
+
+  /**
+   * What to buy to answer the enemy's army as far as it has been seen: guns to break troops dug in, horse to ride
+   * down batteries standing in the open, and line infantry rather than skirmishers or guns against strong horse.
+   */
+  private counterBuys(world: World, count: (t: UnitTypeId) => number): UnitTypeId[] {
+    const seen = world.units.filter((u) => u.side !== this.side && u.seen[this.side] && u.state !== 'routing');
+    const known = [...this.memory.values()];
+    this.seenMax.guns = Math.max(this.seenMax.guns, known.filter((m) => m.type === 'artillery').length);
+    this.seenMax.horse = Math.max(this.seenMax.horse, known.filter((m) => m.type === 'cavalry').length);
+    const foot = seen.filter((e) => e.type === 'line' || e.type === 'light');
+    const dug = foot.length >= 2 ? foot.filter((e) => formationOf(e) === 'fortified').length / foot.length : 0;
+    const out: UnitTypeId[] = [];
+    if (this.seenMax.horse >= 3 && count('cavalry') >= 1) out.push('line');
+    if (dug >= 0.5 && count('artillery') < RULES.artilleryCap) out.push('artillery');
+    if (this.seenMax.guns >= 2 && this.seenMax.horse <= 1 && count('cavalry') < this.doctrine.cavalry + 1) out.push('cavalry');
+    return out;
   }
 
   /** What a regiment is worth to the fight right now: its cost, scaled by strength, morale and fatigue. */
@@ -1315,6 +1540,17 @@ export class AI {
     else p.posture = 'hold';
     // With the clock draining both armies, a side well ahead only has to hold on.
     if (P.clock > 0 && world.time > RULES.timePressureAt && me.armyMorale > them.armyMorale + P.clockLead) p.posture = 'defend';
+    const f = P.judge > 0 ? this.features(world) : null;
+    const chance = f ? winChance(f) : 0.5;
+    // The big push: once points count double, an army not clearly winning throws everything at the enemy's towns.
+    const clearlyWinning = f ? chance > 0.6 : me.armyMorale > them.armyMorale + P.pushLead && me.score >= them.score;
+    this.pushing = P.push > 0 && world.time >= P.pushAt && world.time < RULES.matchLength - 45 && ratio > 0.6 && !clearlyWinning;
+    if (this.pushing) p.posture = 'attack';
+    // Likely to win: keep what we have. Likely to lose: holding on only loses slowly, so attack.
+    const guard = f !== null && chance > P.safeAbove && world.time > 180;
+    const gamble = f !== null && chance < P.gambleBelow && ratio > 0.6 && world.time > 180;
+    if (guard && p.posture === 'attack') p.posture = 'hold';
+    if (gamble) p.posture = 'attack';
 
     if (p.posture === 'defend') {
       if (p.target !== null) this.endAttack(world, true);
@@ -1361,7 +1597,7 @@ export class AI {
     // Holding nothing at all is close to losing outright, so any objective will do.
     const desperate = heldByUs === 0 && heldByThem > 0;
     const behind = P.comeback > 0 && me.armyMorale < them.armyMorale - P.comebackGap && heldByThem > 0 && RULES.recaptureMorale > 0;
-    const limit = desperate ? 2 : P.takeOdds;
+    const limit = desperate ? 2 : this.pushing ? Math.max(P.takeOdds, 1.5) : P.takeOdds;
     let best: number | null = null;
     let bestScore = -Infinity;
     const ranked: [number, number][] = [];
@@ -1377,7 +1613,17 @@ export class AI {
       const onWing = this.doctrine.wing && (o.y - MAP.height / 2) * this.dir() * this.wingSign > 200 ? 1.5 : 1;
       // Reading the whole front, the sector where we can mass the most against the least is the place to strike.
       const massing = F ? Math.min(2, odds(i) / P.frontRatio) : 1;
-      const score = (worth * onWing * massing * 1000) / (defence + 300) - dist(anchor, o) * 0.4 + (i === p.target ? 0.6 : 0);
+      let score = (worth * onWing * massing * 1000) / (defence + 300) - dist(anchor, o) * 0.4 + (i === p.target ? 0.6 : 0);
+      if (f) {
+        // How much taking it would move our chance of winning, times the chance the attack succeeds, less what
+        // the attack is likely to cost in strength (about half the defenders' worth, in ours).
+        const t01 = world.time / RULES.matchLength;
+        const fromThem = world.owners[i] === 1 - this.side;
+        const won = whatIf(f, t01, fromThem ? 2 : 1, fromThem ? RULES.recaptureMorale : 0, 0);
+        const cost = whatIf(f, t01, 0, 0, Math.log((ours - defence * 0.5 + 500) / (ours + 500)));
+        const succeed = strike / (strike + defence * 1.5 + 1);
+        score = (winChance(won) - chance) * succeed - (chance - winChance(cost)) - dist(anchor, o) / 200000 + (i === p.target ? 0.005 : 0);
+      }
       ranked.push([score, i]);
       if (score > bestScore) { bestScore = score; best = i; }
     });
@@ -1385,7 +1631,7 @@ export class AI {
     // In test battles, holding objectives and letting the enemy come beat attacking whenever ahead, so a set-piece
     // attack is only launched when the army must: late in the battle and behind, or holding no objective at all.
     // The rest of the time, spare regiments still pounce wherever they have the numbers.
-    const willing = (this.doctrine.attack === 'stronger' && p.posture === 'attack') || (behind && ratio > 0.8)
+    const willing = this.pushing || gamble || (this.doctrine.attack === 'stronger' && p.posture === 'attack') || (behind && ratio > 0.8)
       || (F !== null && P.frontWill > 0 && best !== null && odds(best) > P.frontRatio);
     if (this.fixed !== undefined) {
       // A look-ahead copy makes the attack it was given, or none.
@@ -1403,6 +1649,7 @@ export class AI {
       else if (fresh) best = v.target !== null && world.owners[v.target] !== this.side ? v.target : null;
       else if (!desperate && !(late && losing) && !willing) best = null;
     } else if (!desperate && !(late && losing) && !willing) best = null;
+    if (guard && !desperate) best = p.target !== null && p.phase === 'assault' ? p.target : null;
     if (best !== p.target) {
       if (p.target !== null) this.endAttack(world, false);
       if (best !== null) {
@@ -1578,7 +1825,7 @@ export class AI {
   /** The freshest line regiment not tied down, kept back once the army has six or more infantry regiments. */
   private pickReserve(infantry: Unit[]): number | null {
     const line = infantry.filter((u) => u.type === 'line' && !this.recovering.has(u.id));
-    if (infantry.length < this.params.reserveFrom || !this.doctrine.reserve) { this.reserveId = null; return null; }
+    if (infantry.length < this.params.reserveFrom || !this.doctrine.reserve || this.pushing) { this.reserveId = null; return null; }
     const current = line.find((u) => u.id === this.reserveId);
     if (current && (current.order.kind === 'attack' || current.morale > 60)) return current.id;
     const fresh = line.slice().sort((a, b) => this.value(b) - this.value(a) || a.id - b.id)[0];
@@ -1587,7 +1834,7 @@ export class AI {
   }
 
   /** The reserve waits behind the line and counter-attacks whoever is pressing one of our regiments hardest. */
-  private reserveOrders(cmds: Command[], u: Unit, mine: Unit[], enemies: Unit[]) {
+  private reserveOrders(world: World, cmds: Command[], u: Unit, mine: Unit[], enemies: Unit[]) {
     const pressed = mine.filter((m) => m.id !== u.id && !isSupport(m) && (m.meleeWith !== null || m.state === 'wavering') && dist(m, u) < 1000);
     let foe: Unit | undefined;
     for (const m of pressed) {
@@ -1599,7 +1846,9 @@ export class AI {
       if (u.order.kind !== 'attack' || u.order.target !== foe.id) cmds.push({ kind: 'attack', side: this.side, ids: [u.id], target: foe.id });
       return;
     }
-    const centre = this.plan.target !== null && this.assault.size ? this.groupCentre(mine.filter((m) => this.assault.has(m.id))) : this.frontAnchor(mine);
+    const expected = this.params.habitFlank > 0 ? this.expectedTown(world) : null;
+    const centre = this.plan.target !== null && this.assault.size ? this.groupCentre(mine.filter((m) => this.assault.has(m.id)))
+      : expected !== null ? OBJECTIVES[expected] : this.frontAnchor(mine);
     this.moveIfFar(cmds, u, clampToMap({ x: centre.x - this.dir() * 350, y: centre.y }, RULES.borderWidth + 80), 150);
   }
 
