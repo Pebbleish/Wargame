@@ -774,7 +774,7 @@ export class World {
   private baseSpeed(u: Unit): number {
     const def = UNIT_TYPES[u.type];
     const f = formationOf(u);
-    const fm = u.type === 'cavalry' && f === 'formation' ? CAVALRY_FORMATION_SPEED : this.stats(u).speed;
+    const fm = u.type === 'cavalry' && f === 'formation' ? CAVALRY_FORMATION_SPEED : f === 'formation' && (u.type === 'line' || u.type === 'light') ? RULES.formationSpeed : this.stats(u).speed;
     let s = def.speed * RULES.moveSpeedScale * fm * (1 - RULES.fatigueSpeedLoss * u.fatigue / 100);
     if (u.state === 'wavering') s *= 0.7;
     return s;
@@ -1240,11 +1240,25 @@ export class World {
       if (d > RULES.shellBlast) continue;
       const falloff = 1 - Math.max(0, d) / RULES.shellBlast;
       let taken = this.fireTaken(t);
-      if (formationOf(t) === 'fortified') taken *= RULES.shellVsFortified;
+      const dug = formationOf(t) === 'fortified';
+      if (dug) taken *= RULES.shellVsFortified;
       if (t.side === u.side) taken *= RULES.friendlyFire;
-      const cas = RULES.shellDamage * strength * falloff * taken * terrainAt(t).cover * this.rng.range(0.7, 1.3);
+      const cas = RULES.shellDamage * strength * falloff * taken * this.cover(t) * this.rng.range(0.7, 1.3);
       this.damage(t, cas, u, 3.5);
+      // A near hit shakes dug-in troops out of their prepared positions for a while.
+      if (dug && t.type !== 'artillery' && t.side !== u.side && falloff > 0.5 && RULES.shellUnsettle > 0) t.digIn = Math.max(t.digIn, RULES.shellUnsettle);
     }
+  }
+
+  /**
+   * Terrain cover on a target. Dug-in troops in a town or woods normally get both protections; with coverStacks
+   * off they only get the better of the two (the dig-in bonus is already counted in fireTaken, so it is divided out).
+   */
+  private cover(t: Unit): number {
+    const c = terrainAt(t).cover;
+    if (RULES.coverStacks || formationOf(t) !== 'fortified') return c;
+    const f = FORMATION.fortified.fireTaken;
+    return Math.min(c, f) / f;
   }
 
   private fireTaken(t: Unit): number {
@@ -1324,11 +1338,10 @@ export class World {
 
     const rangeMod = 1 - 0.7 * (bestD / range);
     const waver = u.state === 'wavering' ? 0.6 : 1;
-    const t = terrainAt(best);
     const taken = this.fireTaken(best);
     const power = this.firepower(u);
     if (power <= 0) return;
-    const cas = u.men * fm * def.lethality * rangeMod * waver * t.cover * taken * scale * power * this.rng.range(0.8, 1.2) * DT;
+    const cas = u.men * fm * def.lethality * rangeMod * waver * this.cover(best) * taken * scale * power * this.rng.range(0.8, 1.2) * DT;
     this.damage(best, cas, u, u.type === 'artillery' ? 3.2 : 2.6);
     u.ammo = Math.max(0, u.ammo - RULES.ammoUse * scale * DT);
     u.firedAt = this.time;
@@ -1345,6 +1358,11 @@ export class World {
       e.morale = Math.max(0, e.morale - impact);
       this.damage(e, e.men * 0.025 * (flank / vs), u, 1);
       if (e.type !== 'cavalry' && formationOf(e) === 'fortified') this.damage(u, u.men * 0.08, e, 2);
+    } else if ((u.type === 'line' || u.type === 'light') && RULES.chargeImpetus > 0 && e.state !== 'routing' && !u.charged.includes(e.id)) {
+      // Infantry going in with the bayonet shakes the enemy on impact, more so from the flank, less against works.
+      u.charged.push(e.id);
+      const vs = formationOf(e) === 'fortified' ? 1.6 : 1;
+      e.morale = Math.max(0, e.morale - (RULES.chargeImpetus * UNIT_TYPES[u.type].shock * this.flankMultiplier(u, e)) / vs);
     }
   }
 
@@ -1546,7 +1564,7 @@ export class World {
     for (const side of [0, 1] as Side[]) {
       const mine = this.owners.filter((o) => o === side).length;
       const theirs = this.owners.filter((o) => o === 1 - side).length;
-      this.sides[side].objectiveDrain += (0.3 * Math.max(0, theirs - mine) * mult / 60) * DT;
+      this.sides[side].objectiveDrain += (RULES.objectiveDrain * Math.max(0, theirs - mine) * mult / 60) * DT;
     }
   }
 

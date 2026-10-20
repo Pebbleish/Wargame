@@ -164,7 +164,7 @@ export const RULES = {
   rallySafeDistance: 450,
   rallySafeNearGeneral: 250, // routed troops by the general rally with the enemy this close
   moraleRecovery: 0.6, // per second when not under pressure
-  fortifyTime: 10, // digging in (only possible out of combat) takes this long before the bonuses apply
+  fortifyTime: 30, // digging in (only possible out of combat) takes this long before the bonuses apply
   artilleryFortifyTime: 5, // guns have to set up (fortify) before they can fire
   retaliateRange: 450, // idle troops only go after attackers this close (or within 1.5x their own range)
   combatRange: 500, // a unit with a visible enemy this close, or under fire, counts as in combat
@@ -175,7 +175,12 @@ export const RULES = {
   shellBlast: 70, // radius of each shell's explosion
   shellDamage: 28, // casualties from a direct hit at full battery strength (halved from 55: guns were half of all kills)
   shellInterval: 3.5, // seconds between shells per battery
-  shellVsFortified: 1.6, // shells are the answer to dug-in troops
+  shellVsFortified: 2.5, // shells are the answer to dug-in troops (was 1.6)
+  shellUnsettle: 10, // a near hit on dug-in troops costs them this many seconds of their dug-in bonus (0: none)
+  coverStacks: 0, // dug-in troops in a town or woods get both protections multiplied (0: only the better of the two)
+  chargeImpetus: 10, // morale knocked off an enemy when infantry charges home into it, before flank and shock (0: none)
+  objectiveDrain: 0.6, // army morale per minute lost for each objective the enemy holds more than us
+  formationSpeed: 0.7, // infantry in formation moves at this share of its top speed
   friendlyFire: 0.5, // share of shell damage your own troops take inside the circle
 
   buildTime: 20, // engineers: seconds to throw up earthworks

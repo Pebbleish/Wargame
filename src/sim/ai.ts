@@ -181,6 +181,8 @@ export const PARAMS = {
   ammoAt: 40, // low
   clock: 0, // once the clock is draining morale and the army is well ahead, it stands on the defensive (0: no change; 1 won 52%, same as without)
   clockLead: 10, // well ahead
+  bombardWait: 0, // while the guns prepare an attack, the infantry waits out of musket range instead of trading volleys (0: closes to fire; with merged attacks 41%)
+  storm: 0, // once the assault goes in, every regiment charges home (0: only when the defender is shaken or heavily outnumbered; with merged attacks 42%)
 };
 
 // Which battle plan answers which enemy habit, from playing every plan against every other (60 battles a pair):
@@ -1537,6 +1539,10 @@ export class AI {
         return;
       }
       if (u.formation !== 'formation') cmds.push({ kind: 'formation', side: this.side, ids: [u.id], formation: 'formation' });
+      if (p.phase === 'bombard' && this.params.bombardWait > 0) {
+        this.moveIfFar(cmds, u, slotAt(stage, k), 80);
+        return;
+      }
       if (p.phase === 'bombard') {
         // Close to firing range and trade volleys while the guns work; stand once in a firefight.
         const nd = Math.min(...enemies.map((e) => dist(u, e)));
@@ -1557,7 +1563,7 @@ export class AI {
       const ranked = defenders.slice().sort((a, b) => (a.morale + dist(a, line) * 0.1) - (b.morale + dist(b, line) * 0.1));
       const foe = ranked[Math.floor(k / 2) % ranked.length];
       const odds = sorted.length / defenders.length;
-      const charge = foe.state === 'wavering' || foe.morale < this.params.chargeMorale || (formationOf(foe) !== 'fortified' && odds >= this.params.chargeOdds && foe.morale < 75);
+      const charge = this.params.storm > 0 || foe.state === 'wavering' || foe.morale < this.params.chargeMorale || (formationOf(foe) !== 'fortified' && odds >= this.params.chargeOdds && foe.morale < 75);
       if (charge) {
         if (u.order.kind !== 'attack' || u.order.target !== foe.id) cmds.push({ kind: 'attack', side: this.side, ids: [u.id], target: foe.id });
         return;
