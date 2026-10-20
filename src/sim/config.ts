@@ -94,6 +94,7 @@ export const RULES = {
   callInCutoff: 12.5 * 60,
   timePressureAt: 7 * 60, // army morale starts to drain on both sides from here
   timePressureRate: 12, // army morale per minute
+  timePressureBehind: 1, // share of that drain felt by a side well behind on army morale
   routingMorale: 4, // army morale lost for each regiment currently routing
   removedMorale: 3.5, // army morale lost for each regiment destroyed or deserted
   deploymentTime: 60,

@@ -127,6 +127,7 @@ export interface SideState {
   queue: CallIn[];
   requisitionUsed: boolean;
   objectiveDrain: number;
+  timeDrain: number; // army morale lost to the clock so far
   regained: number;
   lostMen: number;
   fieldedMen: number;
@@ -235,6 +236,7 @@ function newSide(nation: string): SideState {
     queue: [],
     requisitionUsed: false,
     objectiveDrain: 0,
+    timeDrain: 0,
     regained: 0,
     lostMen: 0,
     fieldedMen: 0,
@@ -1571,6 +1573,12 @@ export class World {
   }
 
   private armyMorale() {
+    if (this.time > RULES.timePressureAt) {
+      // The clock wears on both armies, but less on the one already losing, so a lead can still be overturned.
+      const drain = [0, 1].map((side) => (RULES.timePressureRate / 60) * DT * (this.behind(side as Side) ? RULES.timePressureBehind : 1));
+      this.sides[0].timeDrain += drain[0];
+      this.sides[1].timeDrain += drain[1];
+    }
     for (const side of [0, 1] as Side[]) {
       const b = this.moraleBreakdown(side);
       this.sides[side].armyMorale = Math.max(0, Math.min(100, 100 - b.losses - b.routing - b.removed - b.objectives - b.time + b.regained));
@@ -1586,7 +1594,7 @@ export class World {
       routing: RULES.routingMorale * routing,
       removed: RULES.removedMorale * s.removed,
       objectives: s.objectiveDrain,
-      time: this.time > RULES.timePressureAt ? (RULES.timePressureRate * (this.time - RULES.timePressureAt)) / 60 : 0,
+      time: s.timeDrain,
       regained: s.regained,
     };
   }
