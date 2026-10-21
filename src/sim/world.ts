@@ -263,6 +263,7 @@ export class World {
   units: Unit[] = [];
   sides: [SideState, SideState];
   owners: (Side | -1)[] = [];
+  capture: { side: Side | -1; t: number }[] = []; // who is taking each town, and how far along (seconds)
   events: GameEvent[] = [];
   result: Result | null = null;
   impacts: Impact[] = [];
@@ -278,6 +279,7 @@ export class World {
   constructor(seed = 1, nations: [string, string] = ['Valdmark', 'Ostmark'], mapSeed = mapFor(seed)) {
     generateMap(mapSeed);
     this.owners = OBJECTIVES.map(() => -1);
+    this.capture = OBJECTIVES.map(() => ({ side: -1 as Side | -1, t: 0 }));
     this.rng = new Rng(seed);
     this.sides = [newSide(nations[0]), newSide(nations[1])];
     for (const side of [0, 1] as Side[]) this.placeCore(side);
@@ -1553,14 +1555,31 @@ export class World {
       for (const u of this.units) {
         if (u.state !== 'routing' && !isSupport(u) && dist(u, o) <= RULES.captureRadius) present[u.side] = true;
       }
+      const c = this.capture[i];
       if (present[0] !== present[1]) {
         const side: Side = present[0] ? 0 : 1;
-        if (this.owners[i] !== side) {
+        // A town is taken only after a side has held it alone for captureTime (from neutral or from the enemy).
+        if (this.owners[i] !== side && RULES.captureTime > 0) {
+          if (c.side !== side) {
+            c.side = side;
+            c.t = 0;
+            if (this.owners[i] === 1 - side) this.log((1 - side) as Side, `The enemy is taking ${o.name}`);
+          }
+          c.t += DT;
+        }
+        if (this.owners[i] === side) { c.side = -1; c.t = 0; }
+        if (this.owners[i] !== side && (RULES.captureTime <= 0 || c.t >= RULES.captureTime)) {
+          c.side = -1;
+          c.t = 0;
           this.log(side, `${this.sides[side].nation} takes ${o.name}`);
           // Taking a place back from the enemy lifts the whole army.
           if (this.owners[i] === 1 - side) this.sides[side].regained += RULES.recaptureMorale;
+          this.owners[i] = side;
         }
-        this.owners[i] = side;
+      } else if (!present[0] && !present[1] && c.t > 0) {
+        // Nobody there: the half-taken town slowly goes back.
+        c.t = Math.max(0, c.t - DT);
+        if (c.t === 0) c.side = -1;
       }
       const owner = this.owners[i];
       if (owner !== -1) this.sides[owner].score += (mult / 60) * DT;

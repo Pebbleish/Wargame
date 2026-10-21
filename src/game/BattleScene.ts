@@ -699,6 +699,14 @@ export class BattleScene extends Phaser.Scene {
       const c = owner === -1 ? 0xf4ecd6 : COLORS[owner].fill;
       g.lineStyle(5, c, 0.75);
       g.strokeCircle(ob.x, ob.y, RULES.captureRadius);
+      // A town being taken: an arc in the taker's colour fills up over the capture time.
+      const cap = w.capture[i];
+      if (cap && cap.side !== -1 && cap.t > 0 && RULES.captureTime > 0) {
+        g.lineStyle(10, COLORS[cap.side].fill, 0.95);
+        g.beginPath();
+        g.arc(ob.x, ob.y, RULES.captureRadius + 14, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * Math.min(1, cap.t / RULES.captureTime));
+        g.strokePath();
+      }
       g.lineStyle(4, 0x2a2620, 0.9);
       g.lineBetween(ob.x, ob.y - 95, ob.x, ob.y - 40);
       g.fillStyle(c, 1);

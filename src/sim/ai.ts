@@ -42,33 +42,34 @@ export interface Doctrine {
   fortifyAt: number; // garrisons dig in when the enemy comes this close
   reserve: boolean; // keeps a regiment back to counter-attack
   raid: boolean; // cavalry ranges deep after guns, wagons and the general
+  style: 'column' | 'garrison' | 'mixed'; // with styleByPlan on: infantry as one column, in garrisons, or a column with the rest holding towns
 }
 
 export const DOCTRINES: Doctrine[] = [
   {
     name: 'Fortress', report: 'Scouts report the enemy advancing slowly, its guns close behind its infantry.',
     deploy: ['line', 'artillery', 'artillery'], cavalry: 2, artilleryEvery: 4, lightEvery: 5,
-    attack: 'late', wing: false, fortifyAt: 1200, reserve: true, raid: false,
+    attack: 'late', wing: false, fortifyAt: 1200, reserve: true, raid: false, style: 'garrison',
   },
   {
     name: 'Hammer', report: 'Scouts report enemy infantry massing for an attack.',
     deploy: ['line', 'line', 'artillery'], cavalry: 2, artilleryEvery: 3, lightEvery: 6,
-    attack: 'stronger', wing: false, fortifyAt: 700, reserve: true, raid: false,
+    attack: 'stronger', wing: false, fortifyAt: 700, reserve: true, raid: false, style: 'column',
   },
   {
     name: 'Envelopment', report: 'Scouts report enemy columns working round one of our flanks.',
     deploy: ['light', 'line', 'artillery'], cavalry: 3, artilleryEvery: 5, lightEvery: 3,
-    attack: 'stronger', wing: true, fortifyAt: 900, reserve: false, raid: false,
+    attack: 'stronger', wing: true, fortifyAt: 900, reserve: false, raid: false, style: 'column',
   },
   {
     name: 'Grand battery', report: 'Scouts report the enemy bringing up a great many guns.',
     deploy: ['artillery', 'artillery', 'line'], cavalry: 1, artilleryEvery: 2, lightEvery: 4,
-    attack: 'late', wing: false, fortifyAt: 1200, reserve: true, raid: false,
+    attack: 'late', wing: false, fortifyAt: 1200, reserve: true, raid: false, style: 'garrison',
   },
   {
     name: 'Raiders', report: 'Scouts report strong bodies of enemy horse on the move.',
     deploy: ['cavalry', 'line', 'artillery'], cavalry: 3, artilleryEvery: 4, lightEvery: 4,
-    attack: 'late', wing: true, fortifyAt: 1200, reserve: true, raid: true,
+    attack: 'late', wing: true, fortifyAt: 1200, reserve: true, raid: true, style: 'mixed',
   },
 ];
 
@@ -201,6 +202,12 @@ export const PARAMS = {
   gambleBelow: 0.4, // a likely loss: attack wherever it can
   commander: 0, // a town under attack asks for as many regiments as it takes to match the enemy there, not at most two more (0: by headcount, capped; 1 won 53% before the massed army)
   holdRatio: 1.2, // how much of the enemy strength near a town its defenders should match
+  styleByPlan: 0, // the battle plan sets how the infantry fights: Hammer and Envelopment as one column, Fortress and Grand battery in garrisons, Raiders a column with the rest holding towns (0: `mass` decides for every plan)
+  mixedShare: 0.6, // in a mixed army, the share of the infantry (by worth) that marches in the column
+  centralReserve: 0.25, // share of the infantry (by worth) kept back at a central spot among our towns, to march to any of ours the enemy comes for (0: the column takes everyone). It joins the column when the enemy main body comes near. 25%: 51% vs v44 (480), 15% also 51%; a reserve that never joins cost wins (41% at 25%, 36% at 35%)
+  reserveOdds: 0, // the reserve only marches to a town when it is worth at least this share of the enemy there; otherwise it digs in at its post (0: it always goes)
+  reserveThreat: 800, // a town of ours is threatened when enemy troops come this close, or the enemy starts taking it
+  homeGuard: 0, // one regiment stays in each home town we hold while the rest march in the column (0: the column takes everyone)
   mass: 1, // the infantry fights as one body: no garrisons, takes towns one at a time and attacks whatever stands in its way (0: garrisons and spare regiments; 1 won 79% of 480 against them)
   massReach: 450, // the body attacks enemies this close to any of its regiments (450 won 53% of 960 against 300)
   massDefend: 0, // the body turns back to save a town of ours under attack by a strong enemy force it can reach (0: it only retakes towns once lost; 1 lost 37%)
@@ -334,7 +341,12 @@ export class AI {
   private standAgain = 0; // no new halt before this time
   private grabber: { id: number; town: number } | null = null; // a cavalry regiment sent for an empty town
   private grabAt = 0;
-  private massTarget: number | null = null; // the town the massed infantry is going for
+  private massTarget: number | null = null;
+  private centralIds = new Set<number>(); // the central reserve
+  private reserveCall: { town: number; until: number } | null = null;
+  private reserveMerged = false; // the reserve has joined the column while the enemy's main body is near its post // a town of ours the reserve has marched to save
+  private guards = new Map<number, number>(); // home guards, and the home town each holds
+  private mixedIds = new Set<number>(); // in a mixed army, the regiments in the column // the town the massed infantry is going for
   private massAt = -999;
   private pushing = false; // the army is making its big push
   private seenMax = { guns: 0, horse: 0 }; // most enemy batteries and cavalry regiments known of at once
@@ -542,12 +554,25 @@ export class AI {
       if (worn || falling || dry) this.recovering.add(u.id);
       else if (u.morale > P.restedAt && (P.ammoEarly <= 0 || u.ammo >= 90) && (P.relieve <= 0 || u.ammo >= 60)) this.recovering.delete(u.id);
     }
+    // Which regiments march in the column (none, some or all, by the plan), and which stay as home guards.
+    const column = this.columnFor(world, infantry);
     // One fresh line regiment stays back as a reserve once the army is big enough to spare it.
-    const reserve = this.pickReserve(infantry);
+    const reserve = this.pickReserve(column.size ? infantry.filter((u) => !column.has(u.id)) : infantry);
     this.assault.clear();
     // Engineers dig in at the held objective nearest the front that the enemy is not already at.
     for (const u of mine.filter((m) => m.type === 'engineers')) assigned.set(u.id, this.pontoonSite(world, u, visibleEnemies) ?? this.worksSite(world, u, visibleEnemies));
-    for (const u of infantry.sort((a, b) => a.id - b.id)) {
+    // Column regiments come last, so they only take posts nobody else fills. They follow these posts only when the
+    // column has nowhere to go (every town is ours).
+    for (const u of infantry.sort((a, b) => (column.has(a.id) ? 1 : 0) - (column.has(b.id) ? 1 : 0) || a.id - b.id)) {
+      if (this.centralIds.has(u.id) && !column.has(u.id)) continue;
+      const guarding = this.guards.get(u.id);
+      if (guarding !== undefined) {
+        needs[guarding].need -= 1;
+        assigned.set(u.id, needs[guarding].pos);
+        this.lastGoal.set(u.id, guarding);
+        goalOf.set(u.id, guarding);
+        continue;
+      }
       if (this.recovering.has(u.id) || u.id === reserve) continue;
       let best = -1;
       let bestScore = Infinity;
@@ -585,8 +610,11 @@ export class AI {
     const hunters = P.hunt > 0 ? this.assignHunters(mine, visibleEnemies, assigned, spare, reserve) : new Map<number, Unit>();
     const counters = P.counter > 0 ? this.counterAttacks(world, mine, visibleEnemies) : new Map<number, Unit>();
     if (P.scout > 0) this.watchObjectives(world, mine);
-    const assaultOrders = P.mass > 0 ? this.massOrders(world, cmds, mine, visibleEnemies)
-      : this.plan.target !== null ? this.assaultOrders(world, cmds, mine, visibleEnemies) : new Set<number>();
+    const assaultOrders = new Set<number>(column.size ? this.massOrders(world, cmds, mine.filter((m) => !(m.type === 'line' || m.type === 'light') || column.has(m.id)), visibleEnemies) : []);
+    if (this.centralIds.size && !this.reserveMerged) for (const id of this.centralOrders(world, cmds, infantry.filter((u) => this.centralIds.has(u.id)), visibleEnemies)) assaultOrders.add(id);
+    // Regiments outside the column make set-piece attacks the old way.
+    for (const id of column) this.assault.delete(id);
+    if (this.plan.target !== null && this.assault.size) for (const id of this.assaultOrders(world, cmds, mine, visibleEnemies)) assaultOrders.add(id);
 
     const helpers = this.assignHelpers(world, mine, visibleEnemies, assigned, spare);
     // Spare regiments that could press home, by the enemy each would go for: with group pressing, an enemy is only
@@ -1408,6 +1436,112 @@ export class AI {
     const o = OBJECTIVES[this.grabber.town];
     this.moveIfFar(cmds, u, { x: o.x, y: o.y }, 60);
     return u.id;
+  }
+
+  /**
+   * The infantry marching in the column: everyone, nobody, or (mixed) the strongest share, depending on the plan,
+   * less one guard for each home town we hold when home guards are on.
+   */
+  private columnFor(world: World, infantry: Unit[]): Set<number> {
+    const P = this.params;
+    const style = P.styleByPlan > 0 ? this.doctrine.style : P.mass > 0 ? 'column' : 'garrison';
+    if (style === 'garrison') { this.guards.clear(); this.mixedIds.clear(); return new Set(); }
+    const alive = new Map(infantry.map((u) => [u.id, u]));
+    // Home guards: keep the same regiment at each home town while it lasts; otherwise the nearest.
+    for (const [id, i] of this.guards) if (!alive.has(id) || world.owners[i] !== this.side) this.guards.delete(id);
+    if (P.homeGuard > 0 && infantry.length >= 4) {
+      OBJECTIVES.forEach((o, i) => {
+        if (o.home !== this.side || world.owners[i] !== this.side || [...this.guards.values()].includes(i)) return;
+        const pick = infantry.filter((u) => !this.guards.has(u.id)).sort((a, b) => dist(a, o) - dist(b, o))[0];
+        if (pick) this.guards.set(pick.id, i);
+      });
+    } else this.guards.clear();
+    let pool = infantry.filter((u) => !this.guards.has(u.id));
+    // The central reserve: keep the same regiments while they last, topped up with the nearest to its post.
+    for (const id of this.centralIds) if (!pool.some((u) => u.id === id)) this.centralIds.delete(id);
+    if (P.centralReserve > 0 && pool.length >= 3) {
+      const total = pool.reduce((a, u) => a + this.value(u), 0);
+      const post = this.reservePost(world);
+      let worth = pool.filter((u) => this.centralIds.has(u.id)).reduce((a, u) => a + this.value(u), 0);
+      for (const u of pool.filter((m) => !this.centralIds.has(m.id) && m.morale > 50).sort((a, b) => dist(a, post) - dist(b, post))) {
+        if (worth >= total * P.centralReserve) break;
+        this.centralIds.add(u.id);
+        worth += this.value(u);
+      }
+      // A reserve standing alone in the path of the enemy's main body would be beaten on its own: while that body
+      // is near its post and stronger than it, the reserve marches with the column instead.
+      const body = this.enemyBody();
+      const reserveWorth = pool.filter((u) => this.centralIds.has(u.id)).reduce((a, u) => a + this.value(u), 0);
+      if (body && dist(body, post) < 1200 && body.value > reserveWorth) this.reserveMerged = true;
+      else if (!body || dist(body, post) > 1600) this.reserveMerged = false;
+      if (!this.reserveMerged) pool = pool.filter((u) => !this.centralIds.has(u.id));
+    } else this.centralIds.clear();
+    if (style === 'column') return new Set(pool.map((u) => u.id));
+    // Mixed: keep who is already in the column, and add the strongest until it holds its share of the worth.
+    const total = pool.reduce((a, u) => a + this.value(u), 0);
+    for (const id of this.mixedIds) if (!pool.some((u) => u.id === id)) this.mixedIds.delete(id);
+    let worth = pool.filter((u) => this.mixedIds.has(u.id)).reduce((a, u) => a + this.value(u), 0);
+    for (const u of pool.slice().sort((a, b) => this.value(b) - this.value(a) || a.id - b.id)) {
+      if (worth >= total * P.mixedShare) break;
+      if (this.mixedIds.has(u.id)) continue;
+      this.mixedIds.add(u.id);
+      worth += this.value(u);
+    }
+    return new Set(this.mixedIds);
+  }
+
+  /** Where the central reserve waits: among the towns we hold, a little back from the middle of them. */
+  private reservePost(world: World): Vec {
+    const held = OBJECTIVES.filter((_, i) => world.owners[i] === this.side);
+    const towns = held.length ? held : OBJECTIVES.filter((o) => o.home === this.side);
+    const c = { x: towns.reduce((a, o) => a + o.x, 0) / towns.length, y: towns.reduce((a, o) => a + o.y, 0) / towns.length };
+    return clampToMap({ x: c.x - this.dir() * 150, y: c.y }, RULES.borderWidth + 100);
+  }
+
+  /**
+   * The central reserve waits at its post and marches to any town of ours the enemy comes for, fights there, and
+   * goes back once the town has been clear of the enemy for 20 seconds.
+   */
+  private centralOrders(world: World, cmds: Command[], group: Unit[], enemies: Unit[]): Set<number> {
+    const P = this.params;
+    const handled = new Set<number>(group.map((u) => u.id));
+    if (!group.length) return handled;
+    const post = this.reservePost(world);
+    const foes = enemies.filter((e) => e.state !== 'routing' && !isSupport(e));
+    const strength = group.reduce((a, u) => a + this.value(u), 0);
+    // The most pressing threat: a town being taken first, then the most enemy strength near one of ours.
+    let best: number | null = null;
+    let bestScore = 0;
+    OBJECTIVES.forEach((o, i) => {
+      if (world.owners[i] !== this.side) return;
+      const near = foes.filter((e) => dist(e, o) < P.reserveThreat).reduce((a, e) => a + this.value(e), 0);
+      const taking = world.capture[i]?.side === 1 - this.side;
+      if (!near && !taking) return;
+      if (P.reserveOdds > 0 && strength < near * P.reserveOdds) return;
+      const score = (taking ? 2000 : 0) + near - dist(post, o) * 0.2;
+      if (best === null || score > bestScore) { best = i; bestScore = score; }
+    });
+    if (best !== null) {
+      if (this.reserveCall?.town !== best) world.log(this.side === 0 ? 1 : 0, `Scouts report enemy reserves marching to ${OBJECTIVES[best].name}.`);
+      this.reserveCall = { town: best, until: world.time + 20 };
+    }
+    else if (this.reserveCall && (world.time > this.reserveCall.until || world.owners[this.reserveCall.town] !== this.side)) this.reserveCall = null;
+    const goal: Vec = this.reserveCall ? OBJECTIVES[this.reserveCall.town] : post;
+    group.sort((a, b) => a.id - b.id).forEach((u, n) => {
+      if (u.meleeWith !== null) return;
+      // At a threatened town, fight whatever is there; otherwise march (or wait) in formation.
+      const foe = this.reserveCall ? foes.filter((e) => dist(e, u) < P.massReach && dist(e, goal) < P.reserveThreat + 200).sort((a, b) => dist(a, u) - dist(b, u))[0] : undefined;
+      if (u.formation === 'fortified' && (foe || dist(u, goal) > 250)) cmds.push({ kind: 'formation', side: this.side, ids: [u.id], formation: 'formation' });
+      if (foe) {
+        if (u.order.kind !== 'attack' || u.order.target !== foe.id) cmds.push({ kind: 'attack', side: this.side, ids: [u.id], target: foe.id });
+        return;
+      }
+      const p = clampToMap({ x: goal.x + ((n * 37) % 160) - 80, y: goal.y + ((n * 53) % 200) - 100 }, RULES.borderWidth + 80);
+      if (dist(u, p) > 120) { this.moveIfFar(cmds, u, p, 120); return; }
+      // Waiting at its post or at a town it came to hold, it digs in.
+      if (P.reserveOdds > 0 && u.formation !== 'fortified' && world.canFortify(u)) cmds.push({ kind: 'formation', side: this.side, ids: [u.id], formation: 'fortified' });
+    });
+    return handled;
   }
 
   /** What one of our infantry regiments is worth on average right now. */

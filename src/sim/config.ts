@@ -193,6 +193,7 @@ export const RULES = {
   firingReveals: 5, // seconds a battery stays visible after firing from woods
 
   captureRadius: 160,
+  captureTime: 20, // seconds a side must hold a town alone to take it; the clock pauses while it is contested and runs back while empty
   garrisonThreat: 1500, // the AI leaves a town it holds empty unless enemies are this close
   borderWidth: 40, // impassable strip around the map edge
   crossingCrowd: 160, // regiments this close to a bridge or ford count as on it
