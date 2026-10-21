@@ -139,6 +139,9 @@ export const PARAMS = {
   rally: 1, // the general rides out to rally broken regiments when it can do so safely (0 never does)
   rallyReach: 1500, // how far the general goes to reach them
   pursue: 1, // cavalry rides down routing regiments before they can rally (0 treats them like any other prey)
+  chaseOne: 1, // one cavalry regiment per routing enemy, none after routers about to leave the field or deep among the enemy (0: any number, anywhere; 1 won 51% of 480 and cut cavalry time spent chasing from 40% to 30%)
+  chaseLeash: 900, // how far past our front line a rout is followed
+  chaseEdge: 450, // routers this close to their own edge of the map are left to desert
   focus: 0, // regiments in range concentrate their fire on the same shaky enemy (0 spreads it: focusing lost in tests)
   requisition: 0, // requisitions fresh troops when short of manpower and steady enough to pay for it (0 never: it lost in tests)
   requisitionMorale: 50, // only above this army morale
@@ -201,6 +204,12 @@ export const PARAMS = {
   mass: 1, // the infantry fights as one body: no garrisons, takes towns one at a time and attacks whatever stands in its way (0: garrisons and spare regiments; 1 won 79% of 480 against them)
   massReach: 450, // the body attacks enemies this close to any of its regiments (450 won 53% of 960 against 300)
   massDefend: 0, // the body turns back to save a town of ours under attack by a strong enemy force it can reach (0: it only retakes towns once lost; 1 lost 37%)
+  stand: 1, // reacts to the enemy's main body: when it is near, stronger and coming on, the column halts at the nearest town, digs in and lets it come (0: always presses on; 1 won 45% alone, kept for the four reactions together)
+  columnOdds: 0.85, // stronger: our column is worth less than this share of theirs
+  standIdle: 45, // a halt nobody comes to is given up after this many seconds
+  bombard: 1, // reacts to troops dug in: the column waits out of musket range while the guns work on a dug-in town, then goes in (0: straight in; 1 won 48%)
+  bombardFor: 40, // seconds of shelling at most
+  grab: 1, // reacts to an enemy that masses its army: one cavalry regiment rides for the towns it left empty (0: cavalry stays with the army; 1 won 52%; the four reactions together won 52% and 53% of 480 each)
   massRest: 0, // in the body, a worn regiment steps back behind it to recover while the others fight (0: everyone fights on; 1 lost 46%)
   habitFlank: 0, // learns which flank the enemy attacks on, in this battle and earlier ones, and waits for it there (0: no; 1 won 51%, and gained nothing against a player who always attacks on one flank)
 };
@@ -319,6 +328,12 @@ export class AI {
   private goAt = new Map<number, number>(); // towns whose gathered attackers have been sent in, until when
   private stageFrom = new Map<number, number>(); // when regiments began gathering short of each town
   private pressure = [0, 0, 0]; // enemy regiment-seconds seen in our half in each third of the field, north to south
+  private stance: 'advance' | 'stand' | 'bombard' = 'advance'; // what the column is doing about the enemy in front of it
+  private stanceAt = 0;
+  private bodyLog: { t: number; d: number }[] = []; // how far the enemy's main body has been from our column lately
+  private standAgain = 0; // no new halt before this time
+  private grabber: { id: number; town: number } | null = null; // a cavalry regiment sent for an empty town
+  private grabAt = 0;
   private massTarget: number | null = null; // the town the massed infantry is going for
   private massAt = -999;
   private pushing = false; // the army is making its big push
@@ -588,7 +603,18 @@ export class AI {
     const together = (e: Unit) => P.groupPress <= 0 || (pressing.get(e.id) ?? 0) >= 2;
     const footNear = (p: Vec, r: number) => visibleEnemies.some((e) => e.state !== 'routing' && !isSupport(e) && e.type !== 'artillery' && dist(e, p) < r);
 
+    // Which of our cavalry is already riding down each routing enemy, and where our front is.
+    const chasers = new Map<number, number>();
+    if (P.chaseOne > 0) {
+      for (const m of mine) if (m.type === 'cavalry' && m.order.kind === 'attack' && world.unit(m.order.target)?.state === 'routing') {
+        if (!chasers.has(m.order.target)) chasers.set(m.order.target, m.id);
+        else cmds.push({ kind: 'hold', side: this.side, ids: [m.id] }); // a second rider on the same rout turns back
+      }
+    }
+    const frontX = this.frontAnchor(mine).x;
+    const grabber = P.grab > 0 ? this.grabOrders(world, cmds, mine.filter((m) => m.type === 'cavalry')) : null;
     for (const u of mine) {
+      if (u.id === grabber) continue;
       if (u.meleeWith !== null) continue;
       const nearest = this.nearest(u, visibleEnemies);
       const nd = nearest ? dist(u, nearest) : Infinity;
@@ -626,8 +652,16 @@ export class AI {
         const guarded = (e: Unit) => visibleEnemies.some((g) => g !== e && (g.type === 'line' || g.type === 'light') && g.state !== 'routing' && dist(g, e) < 300);
         // Routing regiments are ridden down first, from further off, before they can rally.
         const chase = (e: Unit) => P.pursue > 0 && e.state === 'routing';
+        const worthChasing = (e: Unit) => {
+          if (P.chaseOne <= 0 || e.state !== 'routing') return true;
+          const other = chasers.get(e.id);
+          if (other !== undefined && other !== u.id) return false; // someone is already on it
+          const toEdge = this.side === 0 ? MAP.width - e.x : e.x;
+          if (toEdge < P.chaseEdge && dist(u, e) > 150) return false; // about to leave the field anyway
+          return (e.x - frontX) * this.dir() < P.chaseLeash; // not deep among the enemy
+        };
         const prey = visibleEnemies
-          .filter((e) => dist(u, e) < reach + (chase(e) ? 300 : 0) && formationOf(e) !== 'fortified' && (e.state !== 'ok' || e.type === 'artillery' || e.type === 'light' || e.type === 'supply'
+          .filter((e) => worthChasing(e) && dist(u, e) < reach + (chase(e) ? 300 : 0) && formationOf(e) !== 'fortified' && (e.state !== 'ok' || e.type === 'artillery' || e.type === 'light' || e.type === 'supply'
             || (e.type === 'general' && dist(u, e) < (this.doctrine.raid ? 1200 : 450)))
             && (dist(u, e) < P.cavReach || !guarded(e)))
           .sort((a, b) => dist(u, a) - (chase(a) ? 400 : 0) - dist(u, b) + (chase(b) ? 400 : 0))[0];
@@ -639,6 +673,7 @@ export class AI {
             && Math.abs(angleDiff(e.facing, Math.atan2(u.y - e.y, u.x - e.x))) > Math.PI / 3)
           .sort((a, b) => dist(u, a) - dist(u, b))[0];
         if (target && u.morale > P.cavMorale && u.fatigue < P.cavFatigue) {
+          if (target.state === 'routing') chasers.set(target.id, u.id);
           if (u.order.kind !== 'attack' || u.order.target !== target.id) cmds.push({ kind: 'attack', side: this.side, ids: [u.id], target: target.id });
         } else if (this.plan.target !== null && u.morale > P.cavMorale) {
           // Wait off the flank of the objective under attack, ready to fall on defenders once they are engaged.
@@ -1230,9 +1265,34 @@ export class AI {
     }
     if (this.massTarget === null) return handled;
     const goal = OBJECTIVES[this.massTarget];
+    const stance = this.readStance(world, mine, foot, at, goal);
+    // Standing: at the nearest town of ours close by, or where the column is. Bombarding: short of the town, out of musket range.
+    let hold: Vec | null = null;
+    if (stance === 'stand') {
+      let near: Vec | null = null;
+      OBJECTIVES.forEach((o, i) => { if (world.owners[i] === this.side && dist(o, at) < 700 && (!near || dist(o, at) < dist(near, at))) near = o; });
+      hold = near ?? at;
+    } else if (stance === 'bombard') {
+      const d = dist(at, goal) || 1;
+      hold = clampToMap({ x: goal.x + ((at.x - goal.x) / d) * 520, y: goal.y + ((at.y - goal.y) / d) * 520 }, RULES.borderWidth + 80);
+    }
     foot.forEach((u, n) => {
       handled.add(u.id);
       if (u.meleeWith !== null) return;
+      if (hold) {
+        // Only fight what comes close, or a wavering enemy within reach; otherwise take post and dig in.
+        const foe = enemies.filter((e) => e.state !== 'routing' && !isSupport(e) && (dist(e, u) < 200 || (e.state === 'wavering' && dist(e, u) < P.massReach)))
+          .sort((a, b) => dist(a, u) - dist(b, u))[0];
+        if (foe) {
+          if (u.formation === 'fortified') cmds.push({ kind: 'formation', side: this.side, ids: [u.id], formation: 'formation' });
+          if (u.order.kind !== 'attack' || u.order.target !== foe.id) cmds.push({ kind: 'attack', side: this.side, ids: [u.id], target: foe.id });
+          return;
+        }
+        const p = clampToMap({ x: hold.x + ((n * 37) % 200) - 100, y: hold.y + ((n * 53) % 260) - 130 }, RULES.borderWidth + 80);
+        if (dist(u, p) > 120) { this.moveIfFar(cmds, u, p, 120); return; }
+        if (stance === 'stand' && u.formation !== 'fortified' && world.canFortify(u)) cmds.push({ kind: 'formation', side: this.side, ids: [u.id], formation: 'fortified' });
+        return;
+      }
       if (P.massRest > 0) {
         if (u.morale < P.restAt || u.ammo < 25) this.recovering.add(u.id);
         else if (u.morale > P.restedAt && u.ammo > 60) this.recovering.delete(u.id);
@@ -1255,6 +1315,99 @@ export class AI {
       this.moveIfFar(cmds, u, p, 120);
     });
     return handled;
+  }
+
+  /**
+   * Read the enemy in front of the column and decide how to deal with it: press on, halt and dig in against a
+   * stronger main body, or wait for the guns against a town held by troops dug in.
+   */
+  private readStance(world: World, mine: Unit[], foot: Unit[], at: Vec, goal: Vec): 'advance' | 'stand' | 'bombard' {
+    const P = this.params;
+    const ours = foot.reduce((a, u) => a + this.value(u), 0);
+    const body = this.enemyBody();
+    let next: 'advance' | 'stand' | 'bombard' = 'advance';
+    const odds = body ? ours / Math.max(1, body.value) : 99;
+    // Only worth halting for an enemy that is coming on: one closing on us, or already in our half. One that sits
+    // tight is not waited for, and a halt nobody comes to is given up after standIdle seconds.
+    if (body) this.bodyLog.push({ t: world.time, d: dist(body, at) });
+    while (this.bodyLog.length && this.bodyLog[0].t < world.time - 20) this.bodyLog.shift();
+    const closing = this.bodyLog.length > 1 && this.bodyLog[0].d - this.bodyLog[this.bodyLog.length - 1].d > 150;
+    const inOurHalf = body !== null && (this.side === 0 ? body.x < MAP.width / 2 : body.x > MAP.width / 2);
+    const idle = this.stance === 'stand' && world.time - this.stanceAt > P.standIdle && !(body && dist(body, at) < 600);
+    if (idle) this.standAgain = world.time + 60;
+    if (P.stand > 0 && body && dist(body, at) < 1300 && world.time >= this.standAgain && !idle
+      && (this.stance === 'stand' ? odds < 1 : odds < P.columnOdds && (closing || inOurHalf))) next = 'stand';
+    if (next === 'advance' && P.bombard > 0 && mine.some((m) => m.type === 'artillery')) {
+      const defenders = world.units.filter((e) => e.side !== this.side && e.seen[this.side] && e.state !== 'routing' && (e.type === 'line' || e.type === 'light') && dist(e, goal) < 400);
+      const dug = defenders.filter((e) => formationOf(e) === 'fortified').length;
+      const shaken = defenders.length ? defenders.reduce((a, e) => a + e.morale, 0) / defenders.length < 55 : true;
+      const started = this.stance === 'bombard' ? this.stanceAt : world.time;
+      if (defenders.length && dug * 2 >= defenders.length && !shaken && world.time - started < P.bombardFor && dist(at, goal) < 1200) next = 'bombard';
+    }
+    if (next !== this.stance) {
+      this.stance = next;
+      this.stanceAt = world.time;
+      const them = this.side === 0 ? 1 : 0;
+      if (next === 'stand') world.log(them, 'Scouts report the enemy column halting to dig in and wait for us.');
+      if (next === 'bombard') world.log(them, 'Scouts report the enemy column halting while its guns shell our works.');
+    }
+    return next;
+  }
+
+  /** The enemy's main body of infantry, as last seen: where it is and what it is worth. */
+  private enemyBody(): (Vec & { value: number }) | null {
+    const foot = [...this.memory.values()].filter((s) => s.type === 'line' || s.type === 'light');
+    if (!foot.length) return null;
+    let best: (Vec & { value: number }) | null = null;
+    for (const s of foot) {
+      const value = foot.filter((o) => dist(o, s) < 700).reduce((a, o) => a + o.value, 0);
+      if (!best || value > best.value) best = { x: s.x, y: s.y, value };
+    }
+    return best;
+  }
+
+  /**
+   * Against an enemy that has massed its army, one cavalry regiment rides for a town it left empty: one it holds,
+   * or nobody does, with no enemy near it and well away from its main body.
+   */
+  private grabOrders(world: World, cmds: Command[], cav: Unit[]): number | null {
+    if (this.grabber && !cav.some((c) => c.id === this.grabber!.id)) this.grabber = null;
+    const enemyNear = (p: Vec, r: number) => world.units.some((e) => e.side !== this.side && e.seen[this.side] && e.state !== 'routing' && !isSupport(e) && dist(e, p) < r)
+      || [...this.memory.values()].some((s) => s.type !== 'supply' && s.type !== 'general' && dist(s, p) < r);
+    if (this.grabber) {
+      const g = this.grabber;
+      const town = OBJECTIVES[g.town];
+      // Give it up once the enemy comes for it, or once it is ours and the enemy is nowhere near.
+      if (enemyNear(town, 600) && world.owners[g.town] === this.side) this.grabber = null;
+      else if (world.owners[g.town] === this.side && world.time - this.grabAt > 60) this.grabber = null;
+    }
+    if (!this.grabber && world.time - this.grabAt > 10) {
+      this.grabAt = world.time;
+      const body = this.enemyBody();
+      let total = 0;
+      for (const s of this.memory.values()) if (s.type === 'line' || s.type === 'light') total += s.value;
+      if (body && body.value > total * 0.6) {
+        let best = null as { id: number; town: number; d: number } | null;
+        OBJECTIVES.forEach((o, i) => {
+          if (world.owners[i] === this.side || enemyNear(o, 900) || dist(o, body) < 1100) return;
+          for (const c of cav) {
+            if (c.meleeWith !== null || c.morale < 50) continue;
+            const d = dist(c, o);
+            if (!best || d < best.d) best = { id: c.id, town: i, d };
+          }
+        });
+        if (best) {
+          this.grabber = { id: best.id, town: best.town };
+          this.grabAt = world.time;
+          world.log(this.side === 0 ? 1 : 0, 'Scouts report enemy horse riding for one of our empty towns.');
+        }
+      }
+    }
+    if (!this.grabber) return null;
+    const u = cav.find((c) => c.id === this.grabber!.id)!;
+    const o = OBJECTIVES[this.grabber.town];
+    this.moveIfFar(cmds, u, { x: o.x, y: o.y }, 60);
+    return u.id;
   }
 
   /** What one of our infantry regiments is worth on average right now. */

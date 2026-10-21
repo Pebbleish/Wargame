@@ -25,7 +25,8 @@ export class SparringBot {
     this.flank = flank ?? [0, 2][h & 1];
     const turtle = { attackRatio: 99, moraleLead: 999, comeback: 0, pressRange: 0, pounceRange: 0, counter: 0, helpers: 0 };
     const doctrine = kind === 'raid' ? { ...DOCTRINES[4], cavalry: 4 } : kind === 'turtle' ? DOCTRINES[0] : kind === 'rush' ? DOCTRINES[1] : undefined;
-    this.inner = new AI(side, seed, { doctrine, params: kind === 'turtle' ? turtle : {} });
+    // The AI underneath keeps the round 8 style (garrisons, no massed column), so the bots stay the same yardstick.
+    this.inner = new AI(side, seed, { doctrine, params: { mass: 0, ...(kind === 'turtle' ? turtle : {}) } });
   }
 
   update(world: World): Command[] {
