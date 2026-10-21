@@ -207,6 +207,9 @@ export const PARAMS = {
   centralReserve: 0.25, // share of the infantry (by worth) kept back at a central spot among our towns, to march to any of ours the enemy comes for (0: the column takes everyone). It joins the column when the enemy main body comes near. 25%: 51% vs v44 (480), 15% also 51%; a reserve that never joins cost wins (41% at 25%, 36% at 35%)
   reserveOdds: 0, // the reserve only marches to a town when it is worth at least this share of the enemy there; otherwise it digs in at its post (0: it always goes)
   reserveThreat: 800, // a town of ours is threatened when enemy troops come this close, or the enemy starts taking it
+  reserveIgnoreHome: 0, // 1: enemy standing nearer one of its own towns than ours is guarding, not coming for us. With reserveNeed: turtle 60% alone, 77% with reserveIdle 90, so off
+  reserveNeed: 0, // 1: a town only needs the reserve when the enemy near it outweighs our own troops already there
+  reserveIdle: 90, // when no town of ours has been threatened for this many seconds, the reserve goes forward with the column (0: it stays). 90 s: turtle 80% (77% without), v45 52%, rush/raid/centre unchanged; 150 s and 240 s did nothing
   homeGuard: 0, // one regiment stays in each home town we hold while the rest march in the column (0: the column takes everyone)
   mass: 1, // the infantry fights as one body: no garrisons, takes towns one at a time and attacks whatever stands in its way (0: garrisons and spare regiments; 1 won 79% of 480 against them)
   massReach: 450, // the body attacks enemies this close to any of its regiments (450 won 53% of 960 against 300)
@@ -344,6 +347,7 @@ export class AI {
   private massTarget: number | null = null;
   private centralIds = new Set<number>(); // the central reserve
   private reserveCall: { town: number; until: number } | null = null;
+  private lastThreat = 0; // when a town of ours was last threatened
   private reserveMerged = false; // the reserve has joined the column while the enemy's main body is near its post // a town of ours the reserve has marched to save
   private guards = new Map<number, number>(); // home guards, and the home town each holds
   private mixedIds = new Set<number>(); // in a mixed army, the regiments in the column // the town the massed infantry is going for
@@ -611,7 +615,7 @@ export class AI {
     const counters = P.counter > 0 ? this.counterAttacks(world, mine, visibleEnemies) : new Map<number, Unit>();
     if (P.scout > 0) this.watchObjectives(world, mine);
     const assaultOrders = new Set<number>(column.size ? this.massOrders(world, cmds, mine.filter((m) => !(m.type === 'line' || m.type === 'light') || column.has(m.id)), visibleEnemies) : []);
-    if (this.centralIds.size && !this.reserveMerged) for (const id of this.centralOrders(world, cmds, infantry.filter((u) => this.centralIds.has(u.id)), visibleEnemies)) assaultOrders.add(id);
+    if (this.centralIds.size && !this.reserveMerged && !column.has([...this.centralIds][0])) for (const id of this.centralOrders(world, cmds, infantry.filter((u) => this.centralIds.has(u.id)), visibleEnemies)) assaultOrders.add(id);
     // Regiments outside the column make set-piece attacks the old way.
     for (const id of column) this.assault.delete(id);
     if (this.plan.target !== null && this.assault.size) for (const id of this.assaultOrders(world, cmds, mine, visibleEnemies)) assaultOrders.add(id);
@@ -1474,7 +1478,10 @@ export class AI {
       const reserveWorth = pool.filter((u) => this.centralIds.has(u.id)).reduce((a, u) => a + this.value(u), 0);
       if (body && dist(body, post) < 1200 && body.value > reserveWorth) this.reserveMerged = true;
       else if (!body || dist(body, post) > 1600) this.reserveMerged = false;
-      if (!this.reserveMerged) pool = pool.filter((u) => !this.centralIds.has(u.id));
+      // With nothing coming for our towns for a while (a turtle, say), the reserve is better used going forward.
+      if (this.townThreatened(world)) this.lastThreat = world.time;
+      const idle = P.reserveIdle > 0 && world.time - this.lastThreat > P.reserveIdle;
+      if (!this.reserveMerged && !idle) pool = pool.filter((u) => !this.centralIds.has(u.id));
     } else this.centralIds.clear();
     if (style === 'column') return new Set(pool.map((u) => u.id));
     // Mixed: keep who is already in the column, and add the strongest until it holds its share of the worth.
@@ -1488,6 +1495,30 @@ export class AI {
       worth += this.value(u);
     }
     return new Set(this.mixedIds);
+  }
+
+  /** Whether the enemy is near one of our towns, or taking one. */
+  private townThreatened(world: World): boolean {
+    const foes = world.units.filter((e) => e.side !== this.side && e.seen[this.side] && e.state !== 'routing' && !isSupport(e));
+    return OBJECTIVES.some((o, i) => {
+      if (world.owners[i] !== this.side) return false;
+      const near = foes.filter((e) => dist(e, o) < this.params.reserveThreat && this.comingFor(world, e, o)).reduce((a, e) => a + this.value(e), 0);
+      return (world.capture[i]?.side === 1 - this.side || near > 0) && this.outweighed(world, o, near);
+    });
+  }
+
+  /** Whether the enemy near our town outweighs our own troops already there (other than the reserve). */
+  private outweighed(world: World, o: Vec, near: number): boolean {
+    if (this.params.reserveNeed <= 0) return true;
+    const ours = world.units.filter((u) => u.side === this.side && u.state !== 'routing' && !isSupport(u) && !this.centralIds.has(u.id) && dist(u, o) < this.params.reserveThreat).reduce((a, u) => a + this.value(u), 0);
+    return near >= ours;
+  }
+
+  /** Whether an enemy regiment near our town is a threat to it, rather than standing guard over one of its own. */
+  private comingFor(world: World, e: Unit, o: Vec): boolean {
+    if (this.params.reserveIgnoreHome <= 0) return true;
+    const d = dist(e, o);
+    return !OBJECTIVES.some((h, i) => world.owners[i] === e.side && dist(e, h) < d);
   }
 
   /** Where the central reserve waits: among the towns we hold, a little back from the middle of them. */
@@ -1514,9 +1545,10 @@ export class AI {
     let bestScore = 0;
     OBJECTIVES.forEach((o, i) => {
       if (world.owners[i] !== this.side) return;
-      const near = foes.filter((e) => dist(e, o) < P.reserveThreat).reduce((a, e) => a + this.value(e), 0);
+      const near = foes.filter((e) => dist(e, o) < P.reserveThreat && this.comingFor(world, e, o)).reduce((a, e) => a + this.value(e), 0);
       const taking = world.capture[i]?.side === 1 - this.side;
       if (!near && !taking) return;
+      if (!this.outweighed(world, o, near)) return;
       if (P.reserveOdds > 0 && strength < near * P.reserveOdds) return;
       const score = (taking ? 2000 : 0) + near - dist(post, o) * 0.2;
       if (best === null || score > bestScore) { best = i; bestScore = score; }
