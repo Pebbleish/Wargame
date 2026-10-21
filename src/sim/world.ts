@@ -3,7 +3,7 @@ import {
 } from './config';
 import {
   CROSSINGS, EARTHWORKS, OBJECTIVES, Vec, addEarthwork, addPontoon, clampToMap, crossesRiver, dist,
-  generateMap, nearCrossing, nearestRiverPoint, planRoute, terrainAt,
+  MapData, generateMap, loadMap, nearCrossing, nearestRiverPoint, planRoute, terrainAt,
 } from './map';
 import { Rng } from './rng';
 import { mapFor } from './fairmaps';
@@ -276,8 +276,9 @@ export class World {
   private groupSpeed = new Map<number, number>();
 
   /** mapSeed picks the battlefield; by default one of the maps vetted as fair (see fairmaps.ts) is taken from the seed. */
-  constructor(seed = 1, nations: [string, string] = ['Valdmark', 'Ostmark'], mapSeed = mapFor(seed)) {
-    generateMap(mapSeed);
+  constructor(seed = 1, nations: [string, string] = ['Valdmark', 'Ostmark'], map: number | MapData = mapFor(seed)) {
+    if (typeof map === 'number') generateMap(map);
+    else loadMap(map);
     this.owners = OBJECTIVES.map(() => -1);
     this.capture = OBJECTIVES.map(() => ({ side: -1 as Side | -1, t: 0 }));
     this.rng = new Rng(seed);

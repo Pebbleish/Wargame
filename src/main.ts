@@ -1,5 +1,6 @@
 import Phaser from 'phaser';
 import { BattleScene } from './game/BattleScene';
+import { EditorScene } from './game/EditorScene';
 import { TitleScreen } from './game/title';
 
 function start() {
@@ -8,7 +9,7 @@ function start() {
     parent: 'game',
     backgroundColor: '#1d1b16',
     scale: { mode: Phaser.Scale.RESIZE, width: window.innerWidth, height: window.innerHeight },
-    scene: [BattleScene],
+    scene: [BattleScene, EditorScene],
   });
   new TitleScreen(document.getElementById('app')!);
 }

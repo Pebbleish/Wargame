@@ -295,6 +295,63 @@ function windRoads(rng: Rng) {
   replace(ROADS, ROADS.map(wind));
 }
 
+/** A battlefield as plain data: what the map editor saves and a battle can be fought on instead of a generated map. */
+export interface MapData {
+  version: 1;
+  name: string;
+  river: Vec[]; // north edge to south edge, or empty for no river
+  crossings: Crossing[];
+  objectives: Omit<ObjectiveDef, 'id'>[];
+  woods: Circle[];
+  hills: Circle[];
+  marshes: Circle[];
+  roads: Vec[][];
+}
+
+/** The battlefield currently laid out, as data. */
+export function currentMap(name = ''): MapData {
+  return structuredClone({
+    version: 1 as const, name, river: RIVER, crossings: CROSSINGS,
+    objectives: OBJECTIVES.map(({ id, ...o }) => { void id; return o; }),
+    woods: WOODS, hills: HILLS, marshes: MARSHES, roads: ROADS,
+  });
+}
+
+/** Lay out a saved battlefield. The objective nearest the middle of the field counts as the centre if none is marked. */
+export function loadMap(d: MapData) {
+  const data = structuredClone(d);
+  replace(EARTHWORKS, []);
+  replace(RIVER, data.river);
+  mapKind = data.river.length ? 'river' : 'open';
+  replace(CROSSINGS, data.crossings);
+  const mid = { x: MAP.width / 2, y: MAP.height / 2 };
+  if (!data.objectives.some((o) => o.centre) && data.objectives.length) {
+    const near = data.objectives.reduce((b, o) => (dist(o, mid) < dist(b, mid) ? o : b));
+    near.centre = true;
+  }
+  replace(OBJECTIVES, data.objectives.map((o, id) => ({ ...o, id })));
+  replace(WOODS, data.woods);
+  replace(HILLS, data.hills);
+  replace(MARSHES, data.marshes);
+  replace(ROADS, data.roads);
+  bakeTerrain();
+}
+
+/** What stops a map being played, in words for the editor. An empty list means it is ready. */
+export function mapProblems(d: MapData): string[] {
+  const out: string[] = [];
+  const names = ['Blue', 'Gold'];
+  for (const side of [0, 1] as const) {
+    const n = d.objectives.filter((o) => o.home === side).length;
+    if (n !== 2) out.push(`${names[side]} needs exactly 2 home towns (has ${n}).`);
+  }
+  if (d.objectives.some((o) => o.home !== undefined && o.kind === 'bridge')) out.push('A bridge cannot be a home town.');
+  if (d.objectives.length < 3) out.push('Place at least 3 objectives.');
+  if (d.river.length && !d.crossings.length) out.push('The river needs at least one bridge or ford.');
+  if (d.river.length && (d.river[0].y > 1 || d.river[d.river.length - 1].y < MAP.height - 1)) out.push('The river must run from the top edge to the bottom edge.');
+  return out;
+}
+
 export function addEarthwork(side: 0 | 1, p: Vec) {
   EARTHWORKS.push({ x: p.x, y: p.y, r: EARTHWORK_RADIUS, side });
 }

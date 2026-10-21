@@ -37,6 +37,7 @@ export interface UiState {
   speed: number;
   labels: boolean;
   spectating: boolean;
+  endNote?: string; // what the result means for the campaign
 }
 
 const PLAYER = 0;
@@ -288,7 +289,7 @@ export class Hud {
 
     this.updateSelection(ui.selected);
     this.updateCaptions(world);
-    this.updateEnd(world);
+    this.updateEnd(world, ui);
   }
 
   private updateSelection(sel: Unit[]) {
@@ -417,7 +418,7 @@ export class Hud {
     this.captions.innerHTML = fresh.map((e) => `<div>${e.text}</div>`).join('');
   }
 
-  private updateEnd(world: World) {
+  private updateEnd(world: World, ui: UiState) {
     if (world.phase !== 'ended' || !world.result || this.endShown) return;
     this.endShown = true;
     const r = world.result;
@@ -430,6 +431,7 @@ export class Hud {
       <tr><td>Points</td><td>${a.score.toFixed(0)}</td><td>${b.score.toFixed(0)}</td></tr>
       <tr><td>Men lost</td><td>${Math.round(a.lostMen).toLocaleString()}</td><td>${Math.round(b.lostMen).toLocaleString()}</td></tr>
       <tr><td>Army morale</td><td>${a.armyMorale.toFixed(0)}</td><td>${b.armyMorale.toFixed(0)}</td></tr></table>
+      ${ui.endNote ? `<p><b>${ui.endNote}</b></p>` : ''}
       <button data-a="again">${this.spectating ? 'Watch another' : 'Play again'}</button> <button data-a="menu">Main menu</button></div>`;
     this.end.style.display = 'flex';
   }

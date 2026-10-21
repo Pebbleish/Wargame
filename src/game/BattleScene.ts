@@ -1,9 +1,11 @@
 import Phaser from 'phaser';
 import { MAP, RULES, UNIT_TYPES, UnitTypeId } from '../sim/config';
-import { AI } from '../sim/ai';
+import { AI, DOCTRINES } from '../sim/ai';
+import { mapFor } from '../sim/fairmaps';
 import { HabitWatcher, mergeHabits, parseHabits } from '../sim/habits';
-import { CROSSINGS, EARTHWORKS, OBJECTIVES, Vec, dist, terrainAt } from '../sim/map';
+import { CROSSINGS, EARTHWORKS, MapData, OBJECTIVES, Vec, dist, terrainAt } from '../sim/map';
 import { Side, Unit, World, experienceOf, formationOf, inZone, isSupport, unitRadius, unitSize } from '../sim/world';
+import { CHAPTERS, campaignProgress, setCampaignProgress } from './campaign';
 import { Hud } from './hud';
 import { paintTerrain } from './terrain';
 
@@ -61,6 +63,10 @@ export class BattleScene extends Phaser.Scene {
   private alertedAt = new Map<string, number>(); // when each kind of alert was last raised, so they do not repeat
   private lastOwners: (Side | -1)[] = [];
   private inMenu = true; // the title screen is up, with an AI battle playing behind it
+  private customMap: MapData | null = null; // a map from the editor, fought on instead of a generated one
+  private chapter: number | null = null; // the campaign battle being fought
+  private endNote = ''; // a line for the end screen: what the result means for the campaign
+  private reported = false; // the end of this battle has been handled
   private playerSeed = 0; // the last battle the player fought or watched, so each new one is the next on the list
   private menuClock = 0; // seconds the title screen has been up, for its slow camera drift
   private menuEndedAt = -1; // when the battle behind the title screen ended, so another can start
@@ -96,6 +102,7 @@ export class BattleScene extends Phaser.Scene {
       menu: () => this.toMenu(),
       spectate: () => {
         this.spectating = !this.spectating;
+        this.chapter = null;
         this.seed += 1;
         this.newBattle();
         this.hud.reset();
@@ -104,7 +111,8 @@ export class BattleScene extends Phaser.Scene {
       aim: () => { if (this.selectedAimers().length) this.aiming = true; },
       ceaseFire: () => this.world.apply({ kind: 'ceaseFire', side: PLAYER, ids: this.selectedAimers().map((u) => u.id) }),
       restart: () => {
-        this.seed += 1;
+        // A campaign battle is fought again on the same field; anything else moves on to the next.
+        if (this.chapter === null) this.seed += 1;
         this.newBattle();
         this.hud.reset();
       },
@@ -121,16 +129,35 @@ export class BattleScene extends Phaser.Scene {
 
     this.setupInput();
     // The title screen starts a battle, opens a menu, or changes settings through these.
-    window.addEventListener('wargame:play', (e) => this.play((e as CustomEvent<{ spectate: boolean }>).detail.spectate));
+    window.addEventListener('wargame:play', (e) => {
+      const d = (e as CustomEvent<{ spectate: boolean; map?: MapData; chapter?: number }>).detail;
+      this.play(d.spectate, d.map, d.chapter);
+    });
+    window.addEventListener('wargame:editor', () => {
+      this.scene.pause();
+      this.scene.setVisible(false);
+      this.scene.launch('editor');
+    });
+    window.addEventListener('wargame:editorExit', (e) => {
+      const map = (e as CustomEvent<{ play?: MapData }>).detail.play;
+      this.scene.stop('editor');
+      this.scene.resume();
+      this.scene.setVisible(true);
+      // The editor lays out its map in place of the menu battle's, so start from a fresh one either way.
+      if (map) this.play(false, map);
+      else this.toMenu();
+    });
     window.addEventListener('wargame:settings', () => { this.showLabels = loadLabelsPref(); });
   }
 
   /** Leave the title screen for a battle: against the AI, or watching two AIs fight. */
-  private play(spectate: boolean) {
+  private play(spectate: boolean, map?: MapData, chapter?: number) {
     this.inMenu = false;
     this.spectating = spectate;
+    this.customMap = map ?? null;
+    this.chapter = chapter ?? null;
     this.playerSeed = Math.max(this.playerSeed, this.seed < MENU_SEEDS ? this.seed : 0) + 1;
-    this.seed = this.playerSeed;
+    this.seed = chapter !== undefined ? CHAPTERS[chapter].seed : this.playerSeed;
     this.showLabels = loadLabelsPref();
     this.newBattle();
     this.speedIndex = loadSpeedPref();
@@ -138,10 +165,24 @@ export class BattleScene extends Phaser.Scene {
     this.fitCamera();
   }
 
+  /** A campaign battle won opens the next one. */
+  private battleOver() {
+    this.reported = true;
+    if (this.chapter === null || this.inMenu) return;
+    const won = this.world.result?.winner === PLAYER;
+    const next = this.chapter + 1;
+    if (won && campaignProgress() < next) setCampaignProgress(next);
+    this.endNote = !won ? `Campaign: ${CHAPTERS[this.chapter].title} must be won before the campaign can go on.`
+      : next < CHAPTERS.length ? `Campaign: battle ${next} of ${CHAPTERS.length} won. Next: ${CHAPTERS[next].title}.`
+      : 'Campaign: the war is won!';
+  }
+
   /** Back to the title screen, with a fresh AI battle playing behind it. */
   private toMenu() {
     this.inMenu = true;
     this.spectating = true;
+    this.customMap = null;
+    this.chapter = null;
     this.seed = menuSeed();
     this.newBattle();
     this.hud.reset();
@@ -175,10 +216,16 @@ export class BattleScene extends Phaser.Scene {
   }
 
   private newBattle() {
-    this.world = new World(this.seed);
+    this.world = new World(this.seed, undefined, this.customMap ?? mapFor(this.seed));
     this.buildMap();
-    // The AI remembers how the player fought in earlier battles and picks its plan with that in mind.
-    this.ais = this.spectating ? [new AI(0, this.seed), new AI(1, this.seed)] : [new AI(1, this.seed, { habits: loadHabits() })];
+    // The AI remembers how the player fought in earlier battles and picks its plan with that in mind; in the
+    // campaign each battle's enemy general has a set plan instead.
+    const ch = this.chapter !== null ? CHAPTERS[this.chapter] : null;
+    if (ch) this.world.sides[1].manpower += ch.enemyBonus;
+    this.ais = this.spectating ? [new AI(0, this.seed), new AI(1, this.seed)]
+      : [new AI(1, this.seed, { habits: loadHabits(), doctrine: ch ? DOCTRINES[ch.doctrine] : undefined })];
+    this.endNote = '';
+    this.reported = false;
     this.watcher = this.spectating ? null : new HabitWatcher(PLAYER);
     this.selected.clear();
     this.pendingCallIn = null;
@@ -538,6 +585,7 @@ export class BattleScene extends Phaser.Scene {
         this.world.step();
         this.acc -= STEP;
         // Once the battle is over, add how the player fought to the record.
+        if (this.world.phase === 'ended' && !this.reported) this.battleOver();
         if (this.watcher && this.world.phase === 'ended') {
           if (this.world.time > 120) saveHabits(mergeHabits(loadHabits(), this.watcher.result()));
           this.watcher = null;
@@ -569,6 +617,7 @@ export class BattleScene extends Phaser.Scene {
         speed: SPEEDS[this.speedIndex],
         spectating: this.spectating,
         labels: this.showLabels,
+        endNote: this.endNote,
       });
     }
   }

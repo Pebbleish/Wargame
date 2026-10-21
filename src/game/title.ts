@@ -1,5 +1,8 @@
 import { RULES } from '../sim/config';
+import { DOCTRINES } from '../sim/ai';
 import { OBJECTIVES } from '../sim/map';
+import { CHAPTERS, campaignProgress, setCampaignProgress } from './campaign';
+import { savedMaps } from './maps';
 
 /**
  * The title screen, in the style of a certain block game: a big stone logo, a yellow splash line that pulses,
@@ -52,7 +55,7 @@ function write(key: string, value: string | null) {
   }
 }
 
-type Screen = 'title' | 'single' | 'multi' | 'options';
+type Screen = 'title' | 'single' | 'multi' | 'options' | 'campaign';
 
 export class TitleScreen {
   private root: HTMLDivElement;
@@ -60,6 +63,9 @@ export class TitleScreen {
   private tab: 'settings' | 'faq' = 'settings';
   private splash = SPLASHES[Math.floor(Math.random() * SPLASHES.length)];
   private confirmClear = false;
+  private mapChoice = ''; // the saved map to fight on in Singleplayer ('' for a new random field)
+  private chapter = -1; // the campaign battle picked in the list
+  private confirmReset = false;
 
   constructor(parent: HTMLElement) {
     this.root = document.createElement('div');
@@ -91,12 +97,15 @@ export class TitleScreen {
   private go(screen: Screen) {
     this.screen = screen;
     this.confirmClear = false;
+    this.confirmReset = false;
+    if (screen === 'campaign') this.chapter = Math.min(campaignProgress(), CHAPTERS.length - 1);
     this.render();
   }
 
-  private play(spectate: boolean) {
+  private play(spectate: boolean, chapter?: number) {
+    const map = !spectate && chapter === undefined ? savedMaps().find((m) => m.name === this.mapChoice) : undefined;
     this.hide();
-    window.dispatchEvent(new CustomEvent('wargame:play', { detail: { spectate } }));
+    window.dispatchEvent(new CustomEvent('wargame:play', { detail: { spectate, map, chapter } }));
   }
 
   private click(e: MouseEvent) {
@@ -108,6 +117,20 @@ export class TitleScreen {
     else if (a === 'options') this.go('options');
     else if (a === 'back') this.go('title');
     else if (a === 'new') this.play(false);
+    else if (a === 'campaign') this.go('campaign');
+    else if (a === 'editor') { this.hide(); window.dispatchEvent(new Event('wargame:editor')); }
+    else if (a === 'map') {
+      const names = ['', ...savedMaps().map((m) => m.name)];
+      this.mapChoice = names[(names.indexOf(this.mapChoice) + 1) % names.length];
+      this.render();
+    }
+    else if (a === 'chapter') { this.chapter = Number(t.dataset.i); this.render(); }
+    else if (a === 'begin') this.play(false, this.chapter);
+    else if (a === 'reset') {
+      if (this.confirmReset) { setCampaignProgress(0); this.go('campaign'); return; }
+      this.confirmReset = true;
+      this.render();
+    }
     else if (a === 'watch') this.play(true);
     else if (a === 'splash') { this.splash = SPLASHES[(SPLASHES.indexOf(this.splash) + 1) % SPLASHES.length]; this.render(); }
     else if (a === 'tab-settings' || a === 'tab-faq') { this.tab = a === 'tab-faq' ? 'faq' : 'settings'; this.render(); }
@@ -143,8 +166,9 @@ export class TitleScreen {
         </div>
         <div class="mc-menu">
           <button class="mc" data-a="single">Singleplayer</button>
+          <button class="mc" data-a="campaign">Campaign</button>
           <button class="mc" data-a="multi">Multiplayer</button>
-          <button class="mc" data-a="options">FAQ / Settings</button>
+          <div class="mc-pair"><button class="mc" data-a="editor">Map Editor</button><button class="mc" data-a="options">FAQ / Settings</button></div>
         </div>
         <div class="corner left">War Game Prototype 0.1</div>
         <div class="corner right">A historical real-time strategy game</div>`;
@@ -155,12 +179,34 @@ export class TitleScreen {
         <div class="mc-screen">
           <h1>Singleplayer</h1>
           <div class="mc-menu">
+            <button class="mc" data-a="map" title="Fight on a new random field, or on a map you made in the Map Editor">Map: ${this.mapChoice ? esc(this.mapChoice) : 'Random field'}</button>
             <button class="mc" data-a="new">New Battle</button>
             <div class="mc-note">Command one army against the AI. It remembers how you fought last time.</div>
             <button class="mc" data-a="watch">Watch AI Battle</button>
             <div class="mc-note">Sit back and watch two AI generals fight it out, with the whole field in view.</div>
           </div>
           <div class="mc-foot"><button class="mc" data-a="back">Back</button></div>
+        </div>`;
+      return;
+    }
+    if (this.screen === 'campaign') {
+      const done = campaignProgress();
+      const c = CHAPTERS[this.chapter];
+      const rows = CHAPTERS.map((ch, i) => {
+        const state = i < done ? 'Won' : i === done ? 'Next battle' : 'Locked';
+        return `<button class="mc-row ${i === this.chapter ? 'sel' : ''} ${i > done ? 'locked' : ''}" data-a="chapter" data-i="${i}" ${i > done ? 'disabled' : ''}>
+          <span class="t">${i + 1}. ${ch.title}</span><span class="s">${state}${i <= done ? ` · enemy plan: ${DOCTRINES[ch.doctrine].name}` : ''}</span></button>`;
+      }).join('');
+      r.innerHTML = `
+        <div class="mc-screen">
+          <h1>Campaign</h1>
+          <div class="mc-panel">${done >= CHAPTERS.length ? 'The war is won! Fight any battle again, or start over.' : `The war with Ostmark: ${CHAPTERS.length} battles, each against a general with a different plan. Win one to open the next.`}</div>
+          <div class="mc-list rows">${rows}</div>
+          ${c ? `<div class="mc-brief"><b>${c.title}</b><br>${c.briefing}${c.enemyBonus ? ` The enemy starts with ${c.enemyBonus} extra manpower.` : ''}</div>` : ''}
+          <div class="mc-menu tight">
+            <button class="mc" data-a="begin" ${this.chapter > done ? 'disabled' : ''}>Begin Battle</button>
+            <div class="mc-pair"><button class="mc" data-a="reset">${this.confirmReset ? 'Click again to reset' : 'Start Over'}</button><button class="mc" data-a="back">Back</button></div>
+          </div>
         </div>`;
       return;
     }
@@ -194,6 +240,8 @@ export class TitleScreen {
       ['How do I get more troops?', 'Call them in from the bar on the left, then click in your deployment zone. Manpower comes in over time, faster with more towns and depots held.'],
       ['How do I beat dug-in troops?', 'Shell them. Guns hit fortified troops much harder, and a near miss shakes them out of their works for a while.'],
       ['Does the AI learn?', 'Yes. It remembers how you fought in earlier battles and picks its plan with that in mind. You can make it forget under Settings.'],
+      ['How does the campaign work?', `It is a run of ${CHAPTERS.length} battles against Ostmark, each against a general with a different plan, and each harder than the last. Win a battle to open the next. Lose, and you can fight it again.`],
+      ['How do I make my own map?', 'Open the Map Editor from the title screen. Paint woods, hills and marsh, place towns, lay roads and a river with bridges, and give each side 2 home towns. Save it, then pick it with the Map button under Singleplayer. Share code turns a map into text you can send to a friend.'],
       ['Is there multiplayer?', 'Not yet. For now, every battle is against the AI.'],
       ['Where are the controls?', 'Press the ? button during a battle for the full list of keys and rules.'],
     ];
@@ -209,4 +257,8 @@ export class TitleScreen {
         <div class="mc-foot"><button class="mc" data-a="back">Done</button></div>
       </div>`;
   }
+}
+
+function esc(s: string): string {
+  return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
 }
