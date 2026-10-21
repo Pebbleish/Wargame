@@ -60,12 +60,18 @@ export class BattleScene extends Phaser.Scene {
   private showLabels = loadLabelsPref(); // the player can turn those words off
   private alertedAt = new Map<string, number>(); // when each kind of alert was last raised, so they do not repeat
   private lastOwners: (Side | -1)[] = [];
+  private inMenu = true; // the title screen is up, with an AI battle playing behind it
+  private playerSeed = 0; // the last battle the player fought or watched, so each new one is the next on the list
+  private menuClock = 0; // seconds the title screen has been up, for its slow camera drift
+  private menuEndedAt = -1; // when the battle behind the title screen ended, so another can start
 
   constructor() {
     super('battle');
   }
 
   create() {
+    this.spectating = true;
+    this.seed = menuSeed();
     this.newBattle();
     this.zones = this.add.graphics();
     this.gfx = this.add.graphics();
@@ -87,6 +93,7 @@ export class BattleScene extends Phaser.Scene {
       hold: () => this.world.apply({ kind: 'hold', side: PLAYER, ids: [...this.selected] }),
       formation: (f) => this.world.apply({ kind: 'formation', side: PLAYER, ids: [...this.selected], formation: f }),
       resign: () => this.world.apply({ kind: 'resign', side: PLAYER }),
+      menu: () => this.toMenu(),
       spectate: () => {
         this.spectating = !this.spectating;
         this.seed += 1;
@@ -113,6 +120,54 @@ export class BattleScene extends Phaser.Scene {
     });
 
     this.setupInput();
+    // The title screen starts a battle, opens a menu, or changes settings through these.
+    window.addEventListener('wargame:play', (e) => this.play((e as CustomEvent<{ spectate: boolean }>).detail.spectate));
+    window.addEventListener('wargame:settings', () => { this.showLabels = loadLabelsPref(); });
+  }
+
+  /** Leave the title screen for a battle: against the AI, or watching two AIs fight. */
+  private play(spectate: boolean) {
+    this.inMenu = false;
+    this.spectating = spectate;
+    this.playerSeed = Math.max(this.playerSeed, this.seed < MENU_SEEDS ? this.seed : 0) + 1;
+    this.seed = this.playerSeed;
+    this.showLabels = loadLabelsPref();
+    this.newBattle();
+    this.speedIndex = loadSpeedPref();
+    this.hud.reset();
+    this.fitCamera();
+  }
+
+  /** Back to the title screen, with a fresh AI battle playing behind it. */
+  private toMenu() {
+    this.inMenu = true;
+    this.spectating = true;
+    this.seed = menuSeed();
+    this.newBattle();
+    this.hud.reset();
+    window.dispatchEvent(new Event('wargame:menu'));
+  }
+
+  /** Behind the title screen the camera drifts slowly over the fighting, and a finished battle makes way for another. */
+  private menuView(delta: number) {
+    this.menuClock += delta / 1000;
+    const cam = this.cameras.main;
+    cam.setZoom(Math.max(this.minZoom() * 1.6, Math.min(cam.width / 1800, 1)));
+    const t = this.menuClock * 0.03;
+    this.centerOn({ x: MAP.width / 2 + Math.sin(t) * MAP.width * 0.22, y: MAP.height / 2 + Math.sin(t * 1.7 + 1) * MAP.height * 0.18 });
+    this.clampCamera();
+    // Skip most of the deployment, so there is fighting to watch soon after the menu opens.
+    if (this.world.phase === 'deploy' && RULES.deploymentTime - this.world.deployLeft > 5) {
+      for (const side of [0, 1] as const) this.world.apply({ kind: 'ready', side });
+    }
+    if (this.world.phase === 'ended') {
+      if (this.menuEndedAt < 0) this.menuEndedAt = this.menuClock;
+      else if (this.menuClock - this.menuEndedAt > 6) {
+        this.menuEndedAt = -1;
+        this.seed = menuSeed();
+        this.newBattle();
+      }
+    }
   }
 
   private canSee(u: Unit): boolean {
@@ -270,6 +325,7 @@ export class BattleScene extends Phaser.Scene {
     });
 
     window.addEventListener('keydown', (e) => {
+      if (this.inMenu) return;
       const k = e.key.toLowerCase();
       if (k === ' ') e.preventDefault();
       // Holding a key, or a browser shortcut like Ctrl + / Ctrl -, should not repeat or trigger game hotkeys.
@@ -470,9 +526,11 @@ export class BattleScene extends Phaser.Scene {
   // ---------- loop ----------
 
   update(_time: number, delta: number) {
-    this.panCamera(delta);
-    if (!this.paused) {
-      this.acc += (Math.min(delta, 250) / 1000) * SPEEDS[this.speedIndex];
+    if (this.inMenu) this.menuView(delta);
+    else this.panCamera(delta);
+    const still = this.inMenu && !loadLiveMenuPref();
+    if (!this.paused && !still) {
+      this.acc += (Math.min(delta, 250) / 1000) * (this.inMenu ? 2 : SPEEDS[this.speedIndex]);
       let guard = 0;
       while (this.acc >= STEP && guard++ < 60) {
         for (const ai of this.ais) for (const c of ai.update(this.world)) this.world.apply(c);
@@ -1107,6 +1165,28 @@ export class BattleScene extends Phaser.Scene {
 
 const HABITS_KEY = 'wargame.habits';
 const LABELS_KEY = 'wargame.labels';
+const SPEED_KEY = 'wargame.speed';
+const MENU_KEY = 'wargame.menuLive';
+// Battles behind the title screen use their own seeds, so the player's battles still run 1, 2, 3 ...
+const MENU_SEEDS = 1000;
+const menuSeed = () => MENU_SEEDS + Math.floor(Math.random() * 100000);
+
+function loadSpeedPref(): number {
+  try {
+    const i = SPEEDS.indexOf(Number(localStorage.getItem(SPEED_KEY)));
+    return i >= 0 ? i : 1;
+  } catch {
+    return 1;
+  }
+}
+
+function loadLiveMenuPref(): boolean {
+  try {
+    return localStorage.getItem(MENU_KEY) !== '0';
+  } catch {
+    return true;
+  }
+}
 
 function loadLabelsPref(): boolean {
   try {

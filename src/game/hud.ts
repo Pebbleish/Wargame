@@ -11,6 +11,7 @@ export interface HudHandlers {
   aim(): void;
   ceaseFire(): void;
   restart(): void;
+  menu(): void;
   spectate(): void;
   resign(): void;
   build(): void;
@@ -131,13 +132,14 @@ export class Hud {
     this.queue.id = 'queue';
     bar.appendChild(this.queue);
 
-    this.controls.innerHTML = `<button data-a="pause">Pause</button><button data-a="slower">−</button><span class="spd" style="align-self:center;min-width:28px;text-align:center">1×</span><button data-a="faster">+</button><button data-a="labels" title="Show or hide the words under regiments: Routing, Wavering, Flanked! and so on (L)">Labels</button><button data-a="help">?</button><button data-a="spectate" title="Watch two AI armies fight">Watch AI</button><button data-a="resign">Resign</button>`;
+    this.controls.innerHTML = `<button data-a="pause">Pause</button><button data-a="slower">−</button><span class="spd" style="align-self:center;min-width:28px;text-align:center">1×</span><button data-a="faster">+</button><button data-a="labels" title="Show or hide the words under regiments: Routing, Wavering, Flanked! and so on (L)">Labels</button><button data-a="help">?</button><button data-a="spectate" title="Watch two AI armies fight">Watch AI</button><button data-a="resign">Resign</button><button data-a="menu" title="Leave this battle for the title screen">Menu</button>`;
     this.controls.addEventListener('click', (e) => {
       const a = (e.target as HTMLElement).dataset.a;
       if (a === 'pause') this.h.pause();
       if (a === 'slower') this.h.speed(-1);
       if (a === 'faster') this.h.speed(1);
       if (a === 'spectate') this.h.spectate();
+      if (a === 'menu') this.h.menu();
       if (a === 'labels') this.h.labels();
       if (a === 'help') this.help.style.display = this.help.style.display === 'none' ? 'block' : 'none';
       if (a === 'resign') {
@@ -217,6 +219,7 @@ export class Hud {
     });
     this.end.addEventListener('click', (e) => {
       if ((e.target as HTMLElement).dataset.a === 'again') this.h.restart();
+      if ((e.target as HTMLElement).dataset.a === 'menu') this.h.menu();
     });
 
     for (const e of [this.top, this.economy, this.captions, bar, this.selection, this.deploy, this.controls, this.help, this.alertBox, this.banner, this.tooltip, this.hint, this.end]) root.appendChild(e);
@@ -427,7 +430,7 @@ export class Hud {
       <tr><td>Points</td><td>${a.score.toFixed(0)}</td><td>${b.score.toFixed(0)}</td></tr>
       <tr><td>Men lost</td><td>${Math.round(a.lostMen).toLocaleString()}</td><td>${Math.round(b.lostMen).toLocaleString()}</td></tr>
       <tr><td>Army morale</td><td>${a.armyMorale.toFixed(0)}</td><td>${b.armyMorale.toFixed(0)}</td></tr></table>
-      <button data-a="again">${this.spectating ? 'Watch another' : 'Play again'}</button></div>`;
+      <button data-a="again">${this.spectating ? 'Watch another' : 'Play again'}</button> <button data-a="menu">Main menu</button></div>`;
     this.end.style.display = 'flex';
   }
 

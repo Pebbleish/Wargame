@@ -1,5 +1,6 @@
 import Phaser from 'phaser';
 import { BattleScene } from './game/BattleScene';
+import { TitleScreen } from './game/title';
 
 function start() {
   new Phaser.Game({
@@ -9,6 +10,7 @@ function start() {
     scale: { mode: Phaser.Scale.RESIZE, width: window.innerWidth, height: window.innerHeight },
     scene: [BattleScene],
   });
+  new TitleScreen(document.getElementById('app')!);
 }
 
 // Wait briefly for the serif font so map labels render in it, but never block the game on it.
