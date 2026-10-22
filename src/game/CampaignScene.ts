@@ -1,7 +1,7 @@
 import Phaser from 'phaser';
 import { UNIT_TYPES, UnitTypeId } from '../sim/config';
 import {
-  Army, BattleOutcome, Campaign, GRID_SIZE, OWNER_NAMES, RANKS, RECRUIT_COST, RELIEF_SECONDS, Territory, WORLD, advance, answerAlert, armyById,
+  Army, BattleOutcome, Campaign, Fight, GRID_SIZE, OWNER_NAMES, RANKS, RECRUIT_COST, RELIEF_SECONDS, Territory, WORLD, advance, answerAlert, armyById,
   attackersOf, autoResolveEncounter, dismiss, encounterLord, encounterMap, encounterSides, encounterTitle, finishTutorial, friendlyGround,
   loadCampaign, newCampaign, ownedBy, playerArmy, previewAttack, rankOf, recruit, refit, refitCost, retreat, saveCampaign, settleEncounter,
   strength, territoryAt, territoryGrid, territoryUnder, winChance,
@@ -19,7 +19,7 @@ const OWNER_RGB: [number, number, number][] = [[93, 111, 143], [199, 154, 58]];
 const OWNER_HEX = [0x2b2e38, 0xd9a92b];
 const ALLY_HEX = 0x5d7aa8;
 const SEA: [number, number, number] = [107, 135, 150];
-const DAY_SECONDS = 2; // real seconds per campaign day at normal speed
+const DAY_SECONDS = 6; // real seconds per campaign day at normal speed
 
 interface Result extends BattleOutcome { kind: 'campaign' | 'tutorial'; skipped?: boolean }
 
@@ -39,6 +39,7 @@ export class CampaignScene extends Phaser.Scene {
   private pan: { x: number; y: number; sx: number; sy: number } | null = null;
   private hover: Territory | null = null;
   private hoverArmy: Army | null = null;
+  private hoverFight: Fight | null = null;
   private keyHandler = (e: KeyboardEvent) => this.onKey(e);
   private uiKey = '';
 
@@ -110,7 +111,7 @@ export class CampaignScene extends Phaser.Scene {
     const cam = this.cameras.main;
     this.input.on('pointerdown', (p: Phaser.Input.Pointer) => {
       if (p.button !== 0) { this.pan = { x: cam.scrollX, y: cam.scrollY, sx: p.x, sy: p.y }; return; }
-      if (this.c.encounter || this.c.over || this.c.alert) return;
+      if (this.c.encounter || this.c.over) return;
       const w = { x: p.worldX, y: p.worldY };
       const me = playerArmy(this.c);
       if (!me.regiments.length || me.busyUntil !== undefined) return;
@@ -133,6 +134,8 @@ export class CampaignScene extends Phaser.Scene {
       }
       const id = territoryAt(this.grid, p.worldX, p.worldY);
       this.hoverArmy = this.armyAt({ x: p.worldX, y: p.worldY });
+      const zr = 1 / Math.max(0.6, cam.zoom);
+      this.hoverFight = this.c.fights.find((f) => Math.hypot(f.x - p.worldX, f.y - 26 * zr - p.worldY) < 18 * zr) ?? null;
       this.hover = id >= 0 ? this.c.territories[id] : null;
       this.renderTip(p.x, p.y);
     });
@@ -154,7 +157,7 @@ export class CampaignScene extends Phaser.Scene {
   }
 
   private onKey(e: KeyboardEvent) {
-    if (e.key === ' ') { e.preventDefault(); if (!this.c.encounter && !this.c.over && !this.c.alert) { this.paused = !this.paused; this.renderUi(true); } }
+    if (e.key === ' ') { e.preventDefault(); if (!this.c.encounter && !this.c.over) { this.paused = !this.paused; this.renderUi(true); } }
   }
 
   /** Paint the country: each territory in its owner's colour, borders darker, the sea round it. */
@@ -207,19 +210,19 @@ export class CampaignScene extends Phaser.Scene {
 
   update(_time: number, delta: number) {
     const c = this.c;
-    if (!this.paused && !c.encounter && !c.over && !c.alert) {
+    if (!this.paused && !c.encounter && !c.over) {
       const me = playerArmy(c);
       const chased = this.chase !== null ? c.armies.find((a) => a.id === this.chase && a.regiments.length) : undefined;
       const marching = !!me.target;
       if (chased) me.target = { x: chased.x, y: chased.y };
       else if (this.chase !== null) { this.chase = null; me.target = null; }
       let left = (Math.min(delta, 200) / 1000 / DAY_SECONDS) * this.speed;
-      while (left > 0 && !c.encounter && !c.over && !c.alert) {
+      while (left > 0 && !c.encounter && !c.over) {
         const dt = Math.min(0.05, left);
         advance(c, this.grid, dt);
         left -= dt;
       }
-      if (c.encounter || c.over || c.alert) { this.paused = true; saveCampaign(c); }
+      if (c.encounter || c.over) { this.paused = true; saveCampaign(c); }
       if (Math.floor(c.day) !== this.lastSavedDay) { this.lastSavedDay = Math.floor(c.day); saveCampaign(c); }
       // Arriving stops the clock so the player can give the next order; pressing Play again waits in place.
       if (marching && !me.target && !c.encounter && me.regiments.length) this.paused = true;
@@ -259,6 +262,21 @@ export class CampaignScene extends Phaser.Scene {
     }
     const me = playerArmy(c);
     if (me.target && me.regiments.length) this.dashed(me, me.target, 0xfffaf0, px);
+    // Battles under way: crossed swords, with a ring that fills as the fight goes on.
+    for (const f of c.fights) {
+      const r = px(15);
+      const done = Phaser.Math.Clamp(1 - (f.endsAt - c.day) / 0.8, 0, 1);
+      g.fillStyle(0x2a2620, 0.75);
+      g.fillCircle(f.x, f.y - px(26), r);
+      g.lineStyle(px(3), 0xc0392b, 1);
+      g.beginPath();
+      g.arc(f.x, f.y - px(26), r, -Math.PI / 2, -Math.PI / 2 + done * Math.PI * 2);
+      g.strokePath();
+      g.lineStyle(px(2.5), 0xfffaf0, 1);
+      const s2 = px(7);
+      g.lineBetween(f.x - s2, f.y - px(26) - s2, f.x + s2, f.y - px(26) + s2);
+      g.lineBetween(f.x + s2, f.y - px(26) - s2, f.x - s2, f.y - px(26) + s2);
+    }
     const seen = new Set<number>();
     for (const a of c.armies) {
       if (!a.regiments.length) continue;
@@ -313,6 +331,7 @@ export class CampaignScene extends Phaser.Scene {
       <div class="panel c-top"></div>
       <div class="panel c-army"></div>
       <div class="panel c-log"></div>
+      <div class="c-alerts"></div>
       <div class="panel c-tip"></div>
       <div class="c-modal"><div class="panel"></div></div>`;
     document.getElementById('app')!.appendChild(ui);
@@ -338,7 +357,11 @@ export class CampaignScene extends Phaser.Scene {
       if (el.dataset.sure) dismiss(c, Number(a.slice(8)));
       else { el.dataset.sure = '1'; el.textContent = 'Sure?'; return; }
     }
-    if (a === 'ride' || a === 'ignore') { answerAlert(c, a === 'ride'); if (a === 'ride') this.paused = false; saveCampaign(c); }
+    if (a.startsWith('ride-') || a.startsWith('ignore-')) {
+      const ride = a.startsWith('ride-');
+      answerAlert(c, Number(a.slice(a.indexOf('-') + 1)), ride);
+      if (ride) { this.chase = null; this.paused = false; }
+    }
     if (a === 'fight') {
       const [mine, theirs] = encounterSides(c);
       const e = c.encounter!;
@@ -366,7 +389,7 @@ export class CampaignScene extends Phaser.Scene {
     const c = this.c;
     const me = playerArmy(c);
     const here = friendlyGround(c, this.grid);
-    const key = JSON.stringify([Math.floor(c.day), c.gold, c.rank, me.regiments, here?.id, c.encounter, c.alert, c.over, this.paused, this.speed, c.log.length, c.log[c.log.length - 1]?.text]);
+    const key = JSON.stringify([Math.floor(c.day), c.gold, c.rank, me.regiments, here?.id, c.encounter, c.alerts, c.fights.length, c.over, this.paused, this.speed, c.log.length, c.log[c.log.length - 1]?.text]);
     if (!force && key === this.uiKey) return;
     this.uiKey = key;
     const income = ownedBy(c, 0).reduce((s, t) => s + t.income, 0);
@@ -400,7 +423,8 @@ export class CampaignScene extends Phaser.Scene {
     this.q('.c-log').innerHTML = `<div class="h">News</div><div class="goal">Take <b>${c.territories.find((t) => t.capital && t.owner !== 0)?.name ?? 'Ostgard'}</b>, Ostmark's capital, to win the war.</div>` +
       c.log.slice(-9).reverse().map((l) => `<div class="l ${l.tone}"><span>Day ${l.day + 1}</span> ${l.text}</div>`).join('');
     this.renderModal();
-    if (c.alert || c.encounter) this.q('.c-tip').style.display = 'none';
+    if (c.encounter) this.q('.c-tip').style.display = 'none';
+    this.renderAlerts();
   }
 
   private renderModal() {
@@ -414,23 +438,6 @@ export class CampaignScene extends Phaser.Scene {
         : `<h2>Defeat</h2><p>Ostmark has taken Valdhaven. The war is lost.</p><button data-a="exit">Back to the title</button>`;
       return;
     }
-    if (c.alert) {
-      const t = c.territories[c.alert.territory];
-      const foe = armyById(c, c.alert.army);
-      const me = playerArmy(c);
-      const days = foe ? Math.max(0.5, Math.round((Math.hypot(foe.x - t.x, foe.y - t.y) / 76) * 2) / 2) : 1;
-      const there = Math.hypot(me.x - t.x, me.y - t.y) < 50;
-      const ours = Math.hypot(me.x - t.x, me.y - t.y) / 90;
-      modal.style.display = 'flex';
-      box.innerHTML = `
-        <div class="alert">Ostmark attacks</div>
-        <h2>${t.name} is in danger</h2>
-        <p>${foe ? `<b>${foe.lord}</b> is marching on ${t.name} with ${foe.regiments.length} regiments (${troopList(foe.regiments)}).` : `Ostmark is marching on ${t.name}.`}
-        They will be there in about ${days} day${days === 1 ? '' : 's'} and storm it two days later.</p>
-        <p>The garrison: ${t.garrison.length ? troopList(t.garrison) : 'none'}. ${there ? 'Your army is in the town: stay and you will defend it, holding out until help comes.' : me.regiments.length ? `Your army is about ${Math.max(0.5, Math.round(ours * 2) / 2)} days' march away.` : ''}</p>
-        <div class="btns"><button data-a="ride" class="on">${there ? `Stay and defend ${t.name}` : `Ride to defend ${t.name}`}</button><button data-a="ignore">Leave it to the garrison</button></div>`;
-      return;
-    }
     const e = c.encounter;
     if (!e) { modal.style.display = 'none'; return; }
     const [mine, theirs] = encounterSides(c);
@@ -442,7 +449,7 @@ export class CampaignScene extends Phaser.Scene {
     const chance = Math.round(winChance(mineAll, theirs) * 100);
     const allyNames = e.allies.map((id) => armyById(c, id)?.lord).filter(Boolean);
     const intro = {
-      field: `${encounterTitle(c)} ${e.attacking ? 'stands in our way' : 'has caught up with us'}.`,
+      field: e.fight !== undefined ? `${allyNames.length ? allyNames.join(' and ') : 'Our lords'} ${allyNames.length > 1 ? 'are' : 'is'} already fighting ${encounterTitle(c)}. We join the battle.` : `${encounterTitle(c)} ${e.attacking ? 'stands in our way' : 'has caught up with us'}.`,
       assault: `${t.name} is held by Ostmark${theirs.length ? `: ${troopList(theirs)}` : ''}. We must storm it.`,
       relief: `${encounterTitle(c)} is besieging ${t.name}. Drive them off and the town is saved; lose and it falls.`,
       holdout: `${encounterTitle(c)} is storming ${t.name}, with us inside. Hold the town until ${e.relief ? `<b>${e.relief.name}</b> arrives, in about ${Math.round(RELIEF_SECONDS / 60)} minutes of battle` : 'they give up'}.`,
@@ -459,12 +466,44 @@ export class CampaignScene extends Phaser.Scene {
       <div class="btns"><button data-a="fight" class="on">Fight the battle</button><button data-a="auto">Settle it at once</button>${e.kind === 'holdout' ? '' : '<button data-a="retreat">Fall back</button>'}</div>`;
   }
 
+  /** Notices of Ostmark's attacks: small, and they do not stop the clock. */
+  private renderAlerts() {
+    const c = this.c;
+    const me = playerArmy(c);
+    this.q('.c-alerts').innerHTML = c.alerts.slice(-3).map((al) => {
+      const i = c.alerts.indexOf(al);
+      const t = c.territories[al.territory];
+      const foe = armyById(c, al.army);
+      const days = Math.max(0.5, Math.round((Math.hypot(me.x - t.x, me.y - t.y) / 90) * 2) / 2);
+      return `<div class="panel al"><span><b>${foe?.lord ?? 'Ostmark'}</b> is marching on <b>${t.name}</b>${me.regiments.length ? ` <small>(${days} days' ride)</small>` : ''}</span>
+        <button data-a="ride-${i}" class="on">Ride there</button><button data-a="ignore-${i}" title="Dismiss">×</button></div>`;
+    }).join('');
+  }
+
   private renderTip(x: number, y: number) {
     const tip = this.q('.c-tip');
     const c = this.c;
     const a = this.hoverArmy;
     const t = this.hover;
-    if ((!a && !t) || this.pan || c.alert || c.encounter || c.over) { tip.style.display = 'none'; return; }
+    const f = this.hoverFight;
+    if (f && !this.pan && !c.encounter) {
+      tip.style.display = 'block';
+      tip.style.left = `${Math.min(x + 16, window.innerWidth - 300)}px`;
+      tip.style.top = `${y + 12}px`;
+      const side = (ids: number[]) => ids.map((id) => armyById(c, id)).filter((b): b is Army => !!b && b.regiments.length > 0);
+      const [ours, theirs] = [side(f.sides[0]), side(f.sides[1])];
+      const town = f.town !== null ? c.territories[f.town] : null;
+      const mine = [...ours.flatMap((b) => b.regiments), ...(town?.owner === 0 ? town.garrison : [])];
+      const foes = [...theirs.flatMap((b) => b.regiments), ...(town?.owner === 1 ? town.garrison : [])];
+      const hours = Math.max(1, Math.round((f.endsAt - c.day) * 24));
+      const pct = Math.round(winChance(mine, foes) * 100);
+      tip.innerHTML = `<b>Battle ${town ? `for ${town.name}` : `near ${c.territories[f.territory].name}`}</b>
+        <div class="troops"><div><span>${ours.map((b) => b.lord).join(', ') || 'Nobody'}${town?.owner === 0 ? ' and the garrison' : ''}</span><span>${Math.round(strength(mine))}</span></div>
+        <div><span>${theirs.map((b) => b.lord).join(', ')}</span><span>${Math.round(strength(foes))}</span></div></div>
+        <small>Our side's chance: ${pct}%. Decided in about ${hours} hours. Ride here to join it.</small>`;
+      return;
+    }
+    if ((!a && !t) || this.pan || c.encounter || c.over) { tip.style.display = 'none'; return; }
     tip.style.display = 'block';
     tip.style.left = `${Math.min(x + 16, window.innerWidth - 300)}px`;
     tip.style.top = `${y + 12}px`;
@@ -486,8 +525,16 @@ export class CampaignScene extends Phaser.Scene {
     const under = attackersOf(c, tt);
     tip.innerHTML = `<b>${tt.name}</b>${tt.capital ? ' (capital)' : ''}<br><small>${OWNER_NAMES[tt.owner]} · ${tt.income} gold a day</small>
       <div class="troops">${tt.garrison.length ? regimentRows(tt.garrison) : '<small>No garrison</small>'}</div>
-      ${under.length ? `<div class="odds bad">Under attack by ${under.map((u) => u.lord).join(' and ')}</div>` : ''}${tt.owner === 1 ? odds(tt) : ''}`;
+      ${under.length ? `<div class="odds bad">Under attack by ${under.map((u) => u.lord).join(' and ')}${siegeLeft(c, tt)}</div>` : ''}${tt.owner === 1 ? odds(tt) : ''}`;
   }
+}
+
+/** How long a besieged town has before it is stormed, as words. */
+function siegeLeft(c: Campaign, t: Territory): string {
+  const b = c.armies.find((a) => a.siege === t.id && a.busyUntil !== undefined && a.fight === undefined);
+  if (!b) return c.fights.some((f) => f.town === t.id) ? '<br>Being stormed now' : '';
+  const days = Math.max(0, b.busyUntil! - c.day);
+  return `<br>Stormed in ${days >= 1 ? `${Math.round(days * 2) / 2} days` : `${Math.max(1, Math.round(days * 24))} hours`}`;
 }
 
 /** "2 line infantry, 1 artillery" */

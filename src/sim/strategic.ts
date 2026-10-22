@@ -51,6 +51,7 @@ export interface Army {
   siege?: number; // the town it is besieging, until busyUntil
   busyUntil?: number; // besieging until this day (Ostmark); raising a new army until this day (yours)
   resting?: boolean; // gone home to fill its ranks
+  fight?: number; // locked in this battle until it is decided
   wander?: number; // the day it picks a new place to stand
 }
 
@@ -65,12 +66,28 @@ export interface Encounter {
   garrison: 0 | 1 | null; // which side the town's garrison fights on, if it fights
   attacking: boolean; // we marched in (true) or were caught or besieged (false)
   relief: { army: number | null; name: string; regiments: ArmyEntry[] } | null; // holdout: who is coming to help
+  fight?: number; // the battle already under way that the player rode into
 }
 
-/** Something the player must hear about at once: Ostmark is marching on one of our towns. */
+/**
+ * A battle under way between lords' armies (and a town's garrison, when it is fought at a town). It goes on for a
+ * while before it is decided, so the player can ride there and join it.
+ */
+export interface Fight {
+  id: number;
+  x: number;
+  y: number;
+  territory: number;
+  sides: [number[], number[]]; // army ids fighting for Valdmark and for Ostmark
+  town: number | null; // a town whose garrison is in it (on its owner's side)
+  endsAt: number; // the day it is decided
+}
+
+/** A notice for the player: Ostmark is marching on one of our towns. It does not stop the clock. */
 export interface Alert {
   territory: number;
   army: number;
+  day: number;
 }
 
 export interface Campaign {
@@ -92,7 +109,9 @@ export interface Campaign {
   lordsUsed: number;
   log: { day: number; text: string; tone: 'good' | 'bad' | 'info' }[];
   encounter: Encounter | null;
-  alert: Alert | null;
+  alerts: Alert[];
+  fights: Fight[];
+  nextFightId: number;
   over: 'won' | 'lost' | null;
   rolls: number; // how many random rolls have been made, so loading a save carries on the same sequence
 }
@@ -112,7 +131,8 @@ export const RELIEF_SECONDS = 300; // how long a besieged town must hold before 
 const CONTACT = 28; // armies this close meet
 const ARRIVE = 24; // an army this close to its target has arrived
 const JOIN = 90; // armies this close to a battle join it
-const SIEGE_DAYS = 2;
+const SIEGE_DAYS = 4; // a besieged town holds out this long before it is stormed: time to ride to its help
+const FIGHT_DAYS = 0.8; // how long a battle between lords goes on before it is decided
 const RANSOM = 250; // gold for a captured enemy lord
 
 const NAMES = ['Aldenburg', 'Brenna', 'Corvin', 'Dravo', 'Eschen', 'Falkmar', 'Grauwitz', 'Holtz', 'Isenau', 'Jarow', 'Kaltbach', 'Lunden', 'Morvay', 'Nesse', 'Orlau', 'Pressa', 'Quentz', 'Rabenau', 'Stelling', 'Tarnow', 'Ulrichs', 'Varnholt', 'Wendel', 'Zellin'];
@@ -201,7 +221,7 @@ export function newCampaign(slot: number, seed: number): Campaign {
   const c: Campaign = {
     version: 2, seed, slot, day: 0, gold: 250, wins: 0, rank: 0, tutorialDone: false,
     territories, armies: [], nextArmyId: 1, enemyGold: 0, lastRaise: 0, attacksToday: 0, attackCap: 1, lordsUsed: 0,
-    log: [], encounter: null, alert: null, over: null, rolls: 0,
+    log: [], encounter: null, alerts: [], fights: [], nextFightId: 1, over: null, rolls: 0,
   };
   // Neighbours share a border on the grid; income follows the size of the land.
   const grid = territoryGrid(c);
@@ -340,17 +360,17 @@ export function attackersOf(c: Campaign, t: Territory): Army[] {
 
 /**
  * Move the campaign on by dt days: armies march, lords on both sides decide what to do, gold comes in at each new day.
- * Stops early, with c.encounter or c.alert set, when the player has a battle to fight or news to hear.
+ * Stops early, with c.encounter set, when the player has a battle to fight.
  */
 export function advance(c: Campaign, grid: Int16Array, dt: number) {
-  if (c.over || c.encounter || c.alert) return;
+  if (c.over || c.encounter) return;
   const me = playerArmy(c);
   const before = Math.floor(c.day);
   c.day += dt;
   if (Math.floor(c.day) > before) newDay(c);
   // March.
   for (const a of c.armies) {
-    if (a.siege !== undefined || !a.target || !a.regiments.length) continue;
+    if (a.siege !== undefined || a.fight !== undefined || !a.target || !a.regiments.length) continue;
     const goal = a.target;
     const d = dist(a, goal);
     const step = MARCH_SPEED * dt * (a.side === 1 ? 0.85 : a.player ? 1 : 0.9);
@@ -362,14 +382,27 @@ export function advance(c: Campaign, grid: Int16Array, dt: number) {
   }
   if (me.regiments.length && me.busyUntil === undefined && playerMeets(c, grid, me)) return;
   thinkEnemy(c, dt);
-  if (c.encounter || c.alert) return;
+  if (c.encounter) return;
   thinkAllies(c);
   lordsClash(c, grid);
+  fightsGoOn(c);
+  c.alerts = c.alerts.filter((al) => c.day - al.day < 3 && armyById(c, al.army)?.regiments.length && c.territories[al.territory].owner === 0);
 }
 
 /** The player's army runs into something: an Ostmark army, an Ostmark town, or one of our towns under siege. */
 function playerMeets(c: Campaign, grid: Int16Array, me: Army): boolean {
-  const foe = fielded(c, 1).find((a) => dist(a, me) < CONTACT);
+  // Riding into a battle already under way: we join it.
+  const f = c.fights.find((g) => dist(g, me) < CONTACT + 10);
+  if (f) {
+    const t = c.territories[f.territory];
+    me.target = null;
+    c.encounter = {
+      territory: f.territory, kind: f.town !== null && t.owner === 0 ? 'relief' : 'field', attacking: true, relief: null, fight: f.id,
+      garrison: f.town !== null ? t.owner : null, enemies: f.sides[1].slice(), allies: f.sides[0].slice(),
+    };
+    return true;
+  }
+  const foe = fielded(c, 1).find((a) => dist(a, me) < CONTACT && a.fight === undefined);
   if (foe) {
     // Meeting the besiegers of one of our towns is a battle to relieve it.
     const sieged = foe.siege !== undefined ? c.territories[foe.siege] : null;
@@ -397,7 +430,7 @@ function playerMeets(c: Campaign, grid: Int16Array, me: Army): boolean {
 }
 
 function alliesNear(c: Campaign, p: { x: number; y: number }): number[] {
-  return allies(c).filter((a) => dist(a, p) < JOIN && !a.resting).map((a) => a.id);
+  return allies(c).filter((a) => dist(a, p) < JOIN && !a.resting && a.fight === undefined).map((a) => a.id);
 }
 
 function startRelief(c: Campaign, t: Territory) {
@@ -490,11 +523,16 @@ function raiseEnemyArmy(c: Campaign, size: number, at?: Territory) {
 function thinkEnemy(c: Campaign, dt: number) {
   const me = playerArmy(c);
   for (const a of fielded(c, 1)) {
+    if (a.fight !== undefined) continue;
     if (a.siege !== undefined) {
       const t = c.territories[a.siege];
       if (t.owner === 1) { a.siege = undefined; continue; }
       if (c.day < (a.busyUntil ?? 0)) continue;
-      siegeResolve(c, a, t);
+      // The siege is up: storm the town. Standing in it, the player must hold it; otherwise it is fought out over a while.
+      const besiegers = fielded(c, 1).filter((b) => b.siege === t.id && b.fight === undefined);
+      if (me.regiments.length && me.busyUntil === undefined && dist(me, t) < JOIN * 0.6) { startHoldout(c, t, besiegers); return; }
+      startFight(c, alliesNear(c, t).map((id) => armyById(c, id)!), besiegers, t);
+      note(c, `${a.lord} is storming ${t.name}! Ride there to join the fight.`, 'bad');
       continue;
     }
     if (a.resting) {
@@ -513,14 +551,14 @@ function thinkEnemy(c: Campaign, dt: number) {
         a.target = null;
         const besiegers = fielded(c, 1).filter((b) => b.siege === t.id);
         if (me.regiments.length && me.busyUntil === undefined && dist(me, t) < JOIN * 0.6) { startHoldout(c, t, besiegers); return; }
-        note(c, `${a.lord} is besieging ${t.name}! It will be stormed in two days unless relieved.`, 'bad');
+        note(c, `${a.lord} is besieging ${t.name}. It can hold out ${SIEGE_DAYS} days.`, 'bad');
         continue;
       }
       a.target = { x: t.x + 14, y: t.y - 10 };
       continue;
     }
     // A weaker army of ours close by is worth chasing.
-    const prey = fielded(c, 0).filter((b) => dist(a, b) < 200 && strength(a.regiments) > strength(b.regiments) * 1.2).sort((p, q) => dist(p, a) - dist(q, a))[0];
+    const prey = fielded(c, 0).filter((b) => b.fight === undefined && dist(a, b) < 200 && strength(a.regiments) > strength(b.regiments) * 1.2).sort((p, q) => dist(p, a) - dist(q, a))[0];
     if (prey) { a.target = { x: prey.x, y: prey.y }; continue; }
     // Strike at one of our towns: spread over the day, at most the day's quota.
     if (c.attacksToday < c.attackCap && roll(c) < dt * 1.6) {
@@ -530,8 +568,9 @@ function thinkEnemy(c: Campaign, dt: number) {
         c.attacksToday++;
         a.mission = goal.id;
         a.target = { x: goal.x + 14, y: goal.y - 10 };
-        c.alert = { territory: goal.id, army: a.id };
-        return;
+        c.alerts.push({ territory: goal.id, army: a.id, day: c.day });
+        note(c, `${a.lord} is marching on ${goal.name}.`, 'bad');
+        continue;
       }
     }
     // Stand on the frontier, moving from place to place now and then.
@@ -544,21 +583,55 @@ function thinkEnemy(c: Campaign, dt: number) {
   }
 }
 
-function siegeResolve(c: Campaign, a: Army, t: Territory) {
-  const besiegers = fielded(c, 1).filter((b) => b.siege === t.id);
-  const helpers = allies(c).filter((b) => dist(b, t) < JOIN && !b.resting);
-  const att = besiegers.flatMap((b) => b.regiments.map((r) => ({ ...r, army: b.id })));
-  const def = [...t.garrison.map((r) => ({ ...r, town: t.id })), ...helpers.flatMap((b) => b.regiments.map((r) => ({ ...r, army: b.id })))];
-  const won = autoBattle(c, att, def);
-  distribute(c, att, besiegers.map((b) => b.id), []);
-  distribute(c, def, helpers.map((b) => b.id), [t.id]);
-  for (const b of besiegers) { b.siege = undefined; b.busyUntil = undefined; }
-  if (won) {
-    capture(c, t, 1);
-  } else {
-    note(c, `${t.name} held out against ${a.lord}${helpers.length ? ` with help from ${helpers.map((h) => h.lord).join(' and ')}` : ''}.`, 'good');
-    for (const b of besiegers) b.resting = true;
+/** A battle begins: the armies on each side stop where they are until it is decided. */
+function startFight(c: Campaign, ours: Army[], theirs: Army[], town: Territory | null) {
+  const p = town ?? { x: (ours[0].x + theirs[0].x) / 2, y: (ours[0].y + theirs[0].y) / 2 };
+  const nearest = town ?? c.territories.slice().sort((a, b) => dist(a, p) - dist(b, p))[0];
+  const f: Fight = { id: c.nextFightId++, x: p.x, y: p.y, territory: nearest.id, sides: [ours.map((a) => a.id), theirs.map((a) => a.id)], town: town?.id ?? null, endsAt: c.day + FIGHT_DAYS };
+  for (const a of [...ours, ...theirs]) { a.fight = f.id; a.target = null; }
+  c.fights.push(f);
+}
+
+/** Battles under way: armies that come near join their side, and when the time is up the battle is decided. */
+function fightsGoOn(c: Campaign) {
+  for (const f of c.fights.slice()) {
+    for (const a of c.armies) {
+      if (a.player || !a.regiments.length || a.fight !== undefined || a.resting || dist(a, f) > JOIN * 0.8) continue;
+      f.sides[a.side].push(a.id);
+      a.fight = f.id;
+      a.target = null;
+    }
+    if (c.day >= f.endsAt) resolveFight(c, f);
   }
+}
+
+function endFight(c: Campaign, f: Fight) {
+  c.fights = c.fights.filter((g) => g !== f);
+  for (const a of c.armies) if (a.fight === f.id) a.fight = undefined;
+}
+
+function resolveFight(c: Campaign, f: Fight) {
+  const t = f.town !== null ? c.territories[f.town] : null;
+  const armies = f.sides.map((ids) => ids.map((id) => armyById(c, id)).filter((a): a is Army => !!a && a.regiments.length > 0)) as [Army[], Army[]];
+  const list = (side: 0 | 1) => [...armies[side].flatMap((b) => b.regiments.map((r) => ({ ...r, army: b.id }))), ...(t && t.owner === side ? t.garrison.map((r) => ({ ...r, town: t.id })) : [])];
+  const ours = list(0);
+  const theirs = list(1);
+  endFight(c, f);
+  if (!theirs.length && !ours.length) return;
+  const won = theirs.length ? (ours.length ? autoBattle(c, ours, theirs) : false) : true;
+  distribute(c, ours, armies[0].map((b) => b.id), t && t.owner === 0 ? [t.id] : []);
+  distribute(c, theirs, armies[1].map((b) => b.id), t && t.owner === 1 ? [t.id] : []);
+  for (const b of armies[1]) { b.siege = undefined; b.busyUntil = undefined; }
+  const lords = (l: Army[]) => l.map((b) => b.lord).join(' and ');
+  if (t && t.owner === 0) {
+    if (won) note(c, `${t.name} has held against ${lords(armies[1])}${armies[0].length ? `, with help from ${lords(armies[0])}` : ''}.`, 'good');
+    else capture(c, t, 1);
+  } else if (won) note(c, `${lords(armies[0])} ${armies[0].length > 1 ? 'have' : 'has'} beaten ${lords(armies[1])} near ${c.territories[f.territory].name}.`, 'good');
+  else note(c, `${lords(armies[1])} ${armies[1].length > 1 ? 'have' : 'has'} beaten ${lords(armies[0])} near ${c.territories[f.territory].name}.`, 'bad');
+  for (const b of won ? armies[1] : armies[0]) b.resting = true;
+  for (const b of [...armies[0], ...armies[1]]) if (b.regiments.length && strength(b.regiments) < 4) b.regiments = [];
+  for (const b of armies[0]) if (!b.regiments.length) { b.busyUntil = c.day + 6; note(c, `${b.lord}'s army has been scattered.`, 'bad'); }
+  for (const b of armies[1]) if (!b.regiments.length) note(c, `${b.lord}'s army has been destroyed.`, 'good');
 }
 
 /**
@@ -568,6 +641,7 @@ function siegeResolve(c: Campaign, a: Army, t: Territory) {
 function thinkAllies(c: Campaign) {
   const me = playerArmy(c);
   for (const a of allies(c)) {
+    if (a.fight !== undefined) continue;
     if (a.resting) {
       if (full(a) > 0.85) a.resting = false;
       else { const home = nearestOwn(c, 0, a); a.target = home ? { x: home.x - 20, y: home.y + 20 } : null; continue; }
@@ -579,16 +653,20 @@ function thinkAllies(c: Campaign) {
       .sort((p, q) => dist(p.t, a) - dist(q.t, a))[0];
     if (threatened) {
       const t = threatened.t;
-      // Arrived before a besieged town: fall on the besiegers at once (unless the player is about to).
-      const besieger = threatened.foes.find((f) => f.siege === t.id);
-      if (besieger && dist(a, t) < JOIN * 0.7 && !(me.regiments.length && dist(me, t) < JOIN * 2)) { siegeResolve(c, besieger, t); continue; }
+      // Arrived before a besieged town: fall on the besiegers (a battle the player can still ride to and join).
+      const besiegers = threatened.foes.filter((f) => f.siege === t.id && f.fight === undefined);
+      if (besiegers.length && dist(a, t) < JOIN * 0.7 && !(me.regiments.length && dist(me, t) < JOIN * 0.6)) {
+        startFight(c, [a], besiegers, t);
+        note(c, `${a.lord} has fallen on the besiegers of ${t.name}.`, 'info');
+        continue;
+      }
       if (a.mission !== t.id) note(c, `${a.lord} rides to the help of ${t.name}.`, 'info');
       a.mission = t.id;
       a.target = { x: t.x - 16, y: t.y + 14 };
       continue;
     }
     a.mission = undefined;
-    const prey = fielded(c, 1).filter((b) => dist(a, b) < 200 && b.siege === undefined && strength(b.regiments) < mine * 0.9).sort((p, q) => dist(p, a) - dist(q, a))[0];
+    const prey = fielded(c, 1).filter((b) => dist(a, b) < 200 && b.siege === undefined && b.fight === undefined && strength(b.regiments) < mine * 0.9).sort((p, q) => dist(p, a) - dist(q, a))[0];
     if (prey) { a.target = { x: prey.x, y: prey.y }; continue; }
     if (a.wander === undefined || c.day >= a.wander || !a.target) {
       const spots = frontTowns(c, 0);
@@ -599,27 +677,14 @@ function thinkAllies(c: Campaign) {
   }
 }
 
-/** Allied and Ostmark armies that meet fight it out, unless the player is close enough to be part of it. */
+/** Allied and Ostmark armies that meet start a battle, which goes on for a while before it is decided. */
 function lordsClash(c: Campaign, grid: Int16Array) {
-  const me = playerArmy(c);
   for (const a of allies(c)) {
-    const foe = fielded(c, 1).find((b) => dist(a, b) < CONTACT && b.siege === undefined);
+    if (a.fight !== undefined) continue;
+    const foe = fielded(c, 1).find((b) => dist(a, b) < CONTACT && b.siege === undefined && b.fight === undefined);
     if (!foe) continue;
-    if (me.regiments.length && dist(me, a) < JOIN * 1.5) continue;
-    const ours = [a, ...allies(c).filter((b) => b !== a && dist(b, a) < JOIN)];
-    const theirs = [foe, ...fielded(c, 1).filter((b) => b !== foe && dist(b, foe) < JOIN && b.siege === undefined)];
-    const mineList = ours.flatMap((b) => b.regiments.map((r) => ({ ...r, army: b.id })));
-    const theirList = theirs.flatMap((b) => b.regiments.map((r) => ({ ...r, army: b.id })));
-    const won = autoBattle(c, mineList, theirList);
-    distribute(c, mineList, ours.map((b) => b.id), []);
-    distribute(c, theirList, theirs.map((b) => b.id), []);
-    const where = territoryUnder(c, grid, a).name;
-    if (won) note(c, `${a.lord} has beaten ${foe.lord} near ${where}.`, 'good');
-    else note(c, `${foe.lord} has beaten ${a.lord} near ${where}.`, 'bad');
-    for (const b of won ? theirs : ours) b.resting = true;
-    for (const b of [...ours, ...theirs]) if (b.regiments.length && strength(b.regiments) < 4) b.regiments = [];
-    for (const b of ours) if (!b.regiments.length) { b.busyUntil = c.day + 6; note(c, `${b.lord}'s army has been scattered.`, 'bad'); }
-    for (const b of theirs) if (!b.regiments.length) note(c, `${b.lord}'s army has been destroyed.`, 'good');
+    startFight(c, [a], [foe], null);
+    note(c, `${a.lord} and ${foe.lord} are fighting near ${territoryUnder(c, grid, a).name}.`, 'info');
   }
 }
 
@@ -723,6 +788,8 @@ export function settleEncounter(c: Campaign, o: BattleOutcome) {
   distribute(c, o.survivors[0], ourArmies, e.garrison === 0 || reliefTown ? [t.id] : [], true);
   distribute(c, o.survivors[1], e.enemies, e.garrison === 1 ? [t.id] : []);
   c.encounter = null;
+  const f = c.fights.find((g) => g.id === e.fight);
+  if (f) endFight(c, f);
   for (const id of e.enemies) { const a = armyById(c, id); if (a) { a.siege = undefined; a.busyUntil = undefined; a.mission = undefined; } }
   if (o.won) {
     c.wins++;
@@ -799,14 +866,14 @@ export function finishTutorial(c: Campaign, survivors: ArmyEntry[]) {
   note(c, 'You have been promoted to Captain and given a small army. Ostmark will strike at our towns: ride to their defence, and take the war back over the border.', 'good');
 }
 
-/** Hear the alert: true to ride to the threatened town's defence. */
-export function answerAlert(c: Campaign, ride: boolean) {
-  const al = c.alert;
+/** Act on a notice: true to ride to the threatened town, false to put it away. */
+export function answerAlert(c: Campaign, index: number, ride: boolean) {
+  const al = c.alerts[index];
   if (!al) return;
-  c.alert = null;
+  c.alerts.splice(index, 1);
   const t = c.territories[al.territory];
   const me = playerArmy(c);
-  if (ride && me.regiments.length) me.target = { x: t.x, y: t.y };
+  if (ride && me.regiments.length && me.busyUntil === undefined) me.target = { x: t.x, y: t.y };
 }
 
 // ---------- recruiting ----------
@@ -852,8 +919,14 @@ export const SLOTS = 2;
 export function loadCampaign(slot: number): Campaign | null {
   try {
     const raw = localStorage.getItem(SAVE_KEY(slot));
-    const c = raw ? (JSON.parse(raw) as Campaign) : null;
-    return c && c.version === 2 ? c : null;
+    const c = raw ? (JSON.parse(raw) as Campaign & { alert?: unknown }) : null;
+    if (!c || c.version !== 2) return null;
+    // Saves from before battles took time.
+    c.alerts ??= [];
+    c.fights ??= [];
+    c.nextFightId ??= 1;
+    delete c.alert;
+    return c;
   } catch {
     return null;
   }
