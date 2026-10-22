@@ -189,11 +189,10 @@ export class BattleScene extends Phaser.Scene {
     this.fitCamera();
   }
 
-  /** The tutorial checks its step after every tick, brings in the enemy's general for the counterattack, and ends the battle when done. */
+  /** The tutorial checks its step after every tick (and moves the enemy), and ends the battle when done. */
   private tutorStep() {
     const t = this.tutorial!;
     t.update(this.world, this.selectedUnits());
-    if (t.wave && !this.ais.length) this.ais = [new AI(1, this.seed)];
     if (t.finished && this.world.phase !== 'ended') this.world.end(PLAYER, t.skipped ? 'Tutorial skipped' : `${t.villageName} is held`);
     this.hud.showTutor({ title: t.title(), text: t.text(), step: t.step, total: t.total });
   }
@@ -295,13 +294,13 @@ export class BattleScene extends Phaser.Scene {
     if (tutorial) {
       this.world.autoEnd = false;
       this.tutorial = new Tutorial(this.world);
-      for (const side of [0, 1] as const) this.world.apply({ kind: 'ready', side });
+      this.world.apply({ kind: 'ready', side: 1 });
       // Every order the player gives is shown to the sergeant, who checks them off.
       const apply = this.world.apply.bind(this.world);
       this.world.apply = (c) => { if (c.side === PLAYER) this.tutorial?.onCommand(c); apply(c); };
     }
     // The AI remembers how the player fought in earlier battles and picks its plan with that in mind. In the
-    // tutorial the enemy only gets a general once its counterattack goes in.
+    // tutorial the enemy has no AI: the tutorial gives it simple orders itself.
     this.ais = this.spectating ? [new AI(0, this.seed), new AI(1, this.seed)]
       : tutorial ? [] : [new AI(1, this.seed, setup ? {} : { habits: loadHabits() })];
     this.endNote = '';
@@ -793,6 +792,7 @@ export class BattleScene extends Phaser.Scene {
       const say = verbs.length ? verbs.join(' / ') : 'attack';
       return { text: say[0].toUpperCase() + say.slice(1), target: true };
     }
+    if (this.world.phase === 'deploy') return this.world.canDeployAt(PLAYER, p) ? { text: 'Place here' } : { text: 'Place troops in your shaded ground', bad: true };
     return { text: 'Move' };
   }
 
@@ -853,6 +853,14 @@ export class BattleScene extends Phaser.Scene {
         this.zones.fillCircle(t.x, t.y, RULES.townDeployRadius);
         this.zones.lineStyle(3, COLORS[0].fill, 0.5);
         this.zones.strokeCircle(t.x, t.y, RULES.townDeployRadius);
+      }
+      // Ground too close to the enemy to set troops down on (the tutorial's village).
+      const k = w.deployKeepOut;
+      if (k) {
+        this.zones.fillStyle(0xb0412e, 0.12);
+        this.zones.fillCircle(k.x, k.y, k.r);
+        this.zones.lineStyle(3, 0xb0412e, 0.7);
+        this.zones.strokeCircle(k.x, k.y, k.r);
       }
     }
 

@@ -23,18 +23,26 @@ interface Step {
   enter?: (t: Tutorial, w: World) => void;
 }
 
+const KEEP_OUT = 750; // no deploying this close to the enemy's village
+
 const k = (key: string) => `<kbd>${key}</kbd>`;
 
 const STEPS: Step[] = [
   {
     title: 'Your first command',
-    text: () => `Welcome, Lieutenant. You have four regiments: two of line infantry, one of light infantry and a battery of guns. Click one of your <b>line infantry</b> regiments to select it.`,
+    text: () => `Welcome, Lieutenant. You have four regiments: two of line infantry, one of light infantry and a battery of guns. Click one of your <b>line infantry</b> regiments (the long dark blocks) to select it.`,
     done: (_t, _w, sel) => sel.some((u) => u.type === 'line'),
+  },
+  {
+    title: 'Placing your troops',
+    text: () => `Before the shooting starts you place your regiments. With one selected, ${k('Right-click')} anywhere in the shaded ground on our side or near our towns to set it down there. You cannot set them down inside the red ring round <b>{v}</b>: the enemy holds it. When every regiment stands where you want it, press <b>Start battle</b>.`,
+    done: (_t, w) => w.phase === 'battle',
   },
   {
     title: 'Marching',
     text: () => `Good. ${k('Right-click')} on the ground to march it there. Send it to the <b>flag</b>.`,
     marker: (t) => t.flag,
+    enter: (t, w) => t.placeFlag(w),
     done: (t, w) => w.units.some((u) => u.side === 0 && u.type === 'line' && dist(u, t.flag) < 160),
   },
   {
@@ -95,7 +103,9 @@ export class Tutorial {
   lost = false;
   finished = false;
   skipped = false;
-  wave = false; // the counterattack has been launched: the enemy now needs an AI
+  wave = false; // the counterattack has been launched
+  private waveIds: number[] = [];
+  private nextDrive = 0;
 
   constructor(world: World) {
     // The village is the town nearest our own that is not anyone's home.
@@ -116,10 +126,9 @@ export class Tutorial {
       u.x = p.x;
       u.y = p.y;
     }
-    // The flag is a good march out from where the regiments stand, off to one side of the way to the village.
-    const room = (p: Vec) => Math.min(...ours.map((u) => dist(u, p)), dist(p, v) + 200);
-    const candidates = [-700, -500, 500, 700].map((dy) => ({ x: mid.x + (v.x - mid.x) * 0.5, y: Math.max(300, Math.min(2700, mid.y + (v.y - mid.y) * 0.5 + dy)) }));
-    this.flag = candidates.sort((a, b) => room(b) - room(a))[0];
+    this.flag = { x: v.x, y: v.y };
+    world.deployTimeLimit = false;
+    world.deployKeepOut = { x: v.x, y: v.y, r: KEEP_OUT };
     // Ostmark holds the village with a weak line regiment and some skirmishers.
     const a = world.spawn(1, 'line', v.x + 60, v.y - 60, { xp: 0 });
     a.men = 1300;
@@ -140,6 +149,7 @@ export class Tutorial {
 
   /** Check the current step; move on when it is done. */
   update(world: World, selected: Unit[]) {
+    this.drive(world);
     const s = this.current;
     if (!s || this.finished) return;
     if (s.done(this, world, selected)) {
@@ -165,6 +175,47 @@ export class Tutorial {
     return this.current?.marker?.(this) ?? null;
   }
 
+  /** Once the battle starts the flag goes a good march out from where the regiments now stand, off to one side of the way to the village. */
+  placeFlag(world: World) {
+    const homes = OBJECTIVES.filter((o) => o.home === 0);
+    const mid = { x: (homes[0].x + homes[1].x) / 2, y: (homes[0].y + homes[1].y) / 2 };
+    const v = this.village;
+    const ours = world.units.filter((u) => u.side === 0 && u.type === 'line');
+    const room = (p: Vec) => Math.min(...ours.map((u) => dist(u, p)), dist(p, v) - 150);
+    const candidates = [-700, -500, 500, 700].map((dy) => ({ x: mid.x + (v.x - mid.x) * 0.5, y: Math.max(300, Math.min(2700, mid.y + (v.y - mid.y) * 0.5 + dy)) }));
+    this.flag = candidates.sort((a, b) => room(b) - room(a))[0];
+  }
+
+  /**
+   * The enemy in the tutorial has no general thinking for it, only simple orders that serve the lesson: the garrison
+   * stands in the village, and the counterattack marches straight on it, falling on whatever it meets there. The horse
+   * keeps behind the foot until they reach the village, then charges the nearest of our regiments.
+   */
+  private drive(world: World) {
+    if (!this.wave || world.time < this.nextDrive) return;
+    this.nextDrive = world.time + 2;
+    const ours = world.units.filter((u) => u.side === 0 && !isSupport(u) && u.state !== 'routing');
+    const wave = this.waveIds.map((id) => world.units.find((u) => u.id === id)).filter((u): u is Unit => !!u && u.state !== 'routing');
+    const footArrived = wave.some((u) => u.type !== 'cavalry' && dist(u, this.village) < 550);
+    const order = (u: Unit, foe: Unit | undefined, x: number, y: number) => {
+      if (foe) {
+        if (u.order.kind !== 'attack' || u.order.target !== foe.id) world.apply({ kind: 'attack', side: 1, ids: [u.id], target: foe.id });
+      } else if (dist(u, { x, y }) > 60 && (u.order.kind !== 'move' || dist(u.order, { x, y }) > 40)) {
+        world.apply({ kind: 'move', side: 1, moves: [{ id: u.id, x, y }] });
+      }
+    };
+    for (const u of wave) {
+      if (u.meleeWith !== null) continue; // already at close quarters: let the fight run
+      const nearest = (r: number, from: Vec) => ours.filter((o) => dist(o, from) < r).sort((a, b) => dist(a, u) - dist(b, u))[0];
+      if (u.type === 'cavalry') {
+        if (footArrived) order(u, nearest(900, this.village), this.village.x, this.village.y);
+        else order(u, undefined, this.village.x + 500, this.village.y + 250);
+      } else {
+        order(u, nearest(450, u), this.village.x, this.village.y);
+      }
+    }
+  }
+
   /** The enemy's answer: two line regiments and some horse march on the village from the east. */
   counterattack(world: World) {
     const from = { x: Math.min(this.village.x + 1500, 3700), y: this.village.y };
@@ -172,9 +223,7 @@ export class Tutorial {
       [{ x: from.x, y: from.y - 180 }, 'line'], [{ x: from.x, y: from.y + 180 }, 'line'], [{ x: from.x + 150, y: from.y + 450 }, 'cavalry'],
     ];
     for (const [p, type] of spots) {
-      const u = world.spawn(1, type, p.x, p.y, { xp: 0 });
-      u.order = { kind: 'move', x: this.village.x, y: this.village.y };
-      u.waypoints = [{ x: this.village.x, y: this.village.y }];
+      this.waveIds.push(world.spawn(1, type, p.x, p.y, { xp: 0 }).id);
     }
     this.wave = true;
     world.log(0, 'Enemy columns are marching on the village!');

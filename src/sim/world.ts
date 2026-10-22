@@ -265,6 +265,8 @@ function newSide(nation: string): SideState {
 export class World {
   phase: 'deploy' | 'battle' | 'ended' = 'deploy';
   deployLeft = RULES.deploymentTime;
+  deployTimeLimit = true; // false: deployment lasts until both sides are ready (the tutorial)
+  deployKeepOut: { x: number; y: number; r: number } | null = null; // nobody may deploy inside this ring
   domination: [number, number] = [0, 0]; // seconds each side has held every objective
   time = 0;
   units: Unit[] = [];
@@ -414,6 +416,7 @@ export class World {
 
   /** During deployment, regiments can be placed in the deployment strip or around their home towns. */
   canDeployAt(side: Side, p: Vec): boolean {
+    if (this.deployKeepOut && dist(p, this.deployKeepOut) < this.deployKeepOut.r) return false;
     return inZone(side, p) || this.homeTowns(side).some((t) => dist(t, p) <= RULES.townDeployRadius);
   }
 
@@ -720,6 +723,7 @@ export class World {
   step() {
     if (this.phase === 'ended') return;
     if (this.phase === 'deploy') {
+      if (!this.deployTimeLimit) return;
       this.deployLeft -= DT;
       if (this.deployLeft <= 0) this.startBattle();
       return;

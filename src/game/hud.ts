@@ -200,7 +200,7 @@ export class Hud {
     });
 
     this.economy.innerHTML = `<span class="mp"></span><button data-a="req" title="+${RULES.requisitionAmount} manpower once, costs ${RULES.requisitionMoraleCost} army morale">Requisition</button><span class="cap" style="color:var(--muted)"></span>`;
-    this.deploy.innerHTML = `<div class="h">Deploy your army</div><div style="margin:4px 0 8px;color:var(--muted)">Right-click to reposition regiments in your zone or around your two towns. Spend your budget on extra troops.</div><button data-a="ready">Start battle</button>`;
+    this.deploy.innerHTML = `<div class="h">Deploy your army</div><div style="margin:4px 0 8px;color:var(--muted)">Right-click to reposition regiments in your zone or around your two towns.<span class="budget"> Spend your budget on extra troops.</span></div><button data-a="ready">Start battle</button>`;
     const key = (k: string) => ` <kbd>${k}</kbd>`;
     this.selection.innerHTML = `<div class="info"></div>
       <div class="btns fm">
@@ -240,7 +240,7 @@ export class Hud {
     const [me, them] = world.sides;
     const mb = (v: number, c: string) => `<div class="bar"><div style="width:${Math.max(0, v)}%;background:${c}"></div></div>`;
     // A battle with no time limit (the tutorial) counts up instead of down.
-    const clockText = world.phase === 'deploy' ? clock(world.deployLeft) : clock(world.autoEnd ? RULES.matchLength - world.time : world.time);
+    const clockText = world.phase === 'deploy' ? (world.deployTimeLimit ? clock(world.deployLeft) : '–') : clock(world.autoEnd ? RULES.matchLength - world.time : world.time);
     const sub = world.phase === 'deploy' ? 'deployment' : !world.autoEnd ? 'elapsed' : world.time >= RULES.finalPushAt ? 'final push · points ×2' : 'remaining';
     const held = (side: number) => world.owners.filter((o) => o === side).length;
     // What is draining the army's morale, biggest first, so it is clear what to fix.

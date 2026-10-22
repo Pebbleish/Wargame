@@ -172,7 +172,8 @@
 
       /* ---------- campaign battles and the tutorial ---------- */
       body.campaign-battle #callins, body.campaign-battle #economy, body.campaign-battle #controls [data-a="spectate"], body.campaign-battle #controls [data-a="menu"] { display: none !important; }
-      body.tutorial #deploy { display: none !important; }
+      body.campaign-battle #deploy .budget { display: none; }
+      body.tutorial #deploy { top: auto; bottom: 16px; }
       #tutor { position: absolute; top: 112px; left: 8px; width: 330px; padding: 10px 14px; display: none; pointer-events: auto; border-left: 4px solid #c58b00 !important; }
       #tutor .who { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
       #tutor .h { font-family: 'EB Garamond', Georgia, serif; font-weight: 700; font-size: 20px; }
