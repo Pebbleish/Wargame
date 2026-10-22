@@ -169,6 +169,59 @@
       #title button.mc-row.locked { opacity: 0.45; cursor: default; }
       #title .mc-brief { margin-top: 12px; width: min(620px, 100%); font-size: 21px; line-height: 1.1; color: #e0e0e0; text-shadow: 2px 2px 0 #222; }
 
+
+      /* ---------- campaign battles and the tutorial ---------- */
+      body.campaign-battle #callins, body.campaign-battle #economy, body.campaign-battle #controls [data-a="spectate"], body.campaign-battle #controls [data-a="menu"] { display: none !important; }
+      body.tutorial #deploy { display: none !important; }
+      #tutor { position: absolute; top: 112px; left: 8px; width: 330px; padding: 10px 14px; display: none; pointer-events: auto; border-left: 4px solid #c58b00 !important; }
+      #tutor .who { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+      #tutor .h { font-family: 'EB Garamond', Georgia, serif; font-weight: 700; font-size: 20px; }
+      #tutor p { margin: 6px 0 8px; line-height: 1.45; }
+      #tutor kbd { font-family: inherit; font-size: 11px; border: 1px solid var(--edge); border-radius: 3px; padding: 0 4px; background: #fffaf0; }
+      #tutor .foot { display: flex; justify-content: space-between; align-items: center; font-size: 11px; color: var(--muted); }
+      #tutor .foot button { font-size: 11px; padding: 2px 8px; }
+
+      /* ---------- campaign map ---------- */
+      body.in-campaign #hud, body.in-campaign #title { display: none !important; }
+      #camp { position: absolute; inset: 0; pointer-events: none; font-size: 13px; }
+      #camp .panel { pointer-events: auto; background: var(--paper); border: 1px solid var(--edge); border-radius: 6px; box-shadow: 0 2px 10px rgba(0,0,0,0.35); }
+      #camp small { color: var(--muted); font-size: 11px; }
+      #camp .c-top { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); display: flex; gap: 14px; align-items: center; padding: 6px 12px; white-space: nowrap; max-width: calc(100vw - 16px); overflow-x: auto; }
+      #camp .c-top .d { font-family: 'EB Garamond', Georgia, serif; font-weight: 700; font-size: 20px; }
+      #camp .c-army { position: absolute; top: 60px; left: 8px; width: 290px; padding: 8px 10px; max-height: calc(100vh - 70px); overflow-y: auto; }
+      #camp .h { font-family: 'EB Garamond', Georgia, serif; font-weight: 700; font-size: 18px; display: flex; flex-direction: column; }
+      #camp .reg { display: grid; grid-template-columns: 1fr auto 60px 36px 22px; gap: 6px; align-items: center; padding: 2px 0; border-bottom: 1px solid rgba(140,123,88,0.25); }
+      #camp .reg .pips { color: #c58b00; font-size: 10px; letter-spacing: -1px; }
+      #camp .reg .bar { height: 6px; background: rgba(0,0,0,0.15); border-radius: 3px; overflow: hidden; }
+      #camp .reg .bar span { display: block; height: 100%; background: var(--good); }
+      #camp .reg .m { font-size: 11px; color: var(--muted); text-align: right; }
+      #camp .reg button { padding: 0 4px; font-size: 11px; line-height: 16px; }
+      #camp .sub { margin: 8px 0 4px; font-weight: 600; }
+      #camp .shop { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-bottom: 4px; }
+      #camp .shop button { font-size: 12px; padding: 3px 6px; text-align: left; }
+      #camp .c-army > button { width: 100%; }
+      #camp .why { color: var(--bad); font-size: 12px; min-height: 16px; }
+      #camp .muted { color: var(--muted); font-size: 12px; line-height: 1.4; margin: 4px 0; }
+      #camp kbd { font-family: inherit; font-size: 10px; border: 1px solid var(--edge); border-radius: 3px; padding: 0 3px; background: #fffaf0; }
+      #camp .c-log { position: absolute; top: 60px; right: 8px; width: 270px; padding: 8px 10px; max-height: calc(100vh - 70px); overflow-y: auto; }
+      #camp .c-log .goal { font-size: 12px; margin-bottom: 6px; }
+      #camp .c-log .l { font-size: 12px; padding: 3px 0 3px 6px; border-left: 3px solid var(--edge); margin: 3px 0; line-height: 1.35; }
+      #camp .c-log .l span { color: var(--muted); font-size: 11px; }
+      #camp .c-log .l.good { border-left-color: var(--good); }
+      #camp .c-log .l.bad { border-left-color: var(--bad); }
+      #camp .c-tip { position: absolute; display: none; padding: 6px 8px; font-size: 12px; pointer-events: none; line-height: 1.4; }
+      #camp .c-modal { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(20,18,12,0.5); pointer-events: auto; }
+      #camp .c-modal .panel { padding: 18px 24px; width: min(520px, calc(100vw - 32px)); }
+      #camp .c-modal h2 { font-family: 'EB Garamond', Georgia, serif; font-size: 30px; margin: 0; }
+      #camp .c-modal table { border-collapse: collapse; margin: 8px 0; width: 100%; }
+      #camp .c-modal td { padding: 4px 6px; border-bottom: 1px solid rgba(140,123,88,0.3); vertical-align: top; }
+      #camp .c-modal td:last-child { text-align: right; }
+      #camp .c-modal .btns { display: flex; gap: 6px; flex-wrap: wrap; }
+      @media (max-width: 760px) {
+        #camp .c-log { display: none; }
+        #camp .c-army { top: auto; bottom: 8px; max-height: 40vh; width: calc(100vw - 16px); }
+        #tutor { width: calc(100vw - 16px); top: auto; bottom: 8px; }
+      }
       /* ---------- map editor ---------- */
       body.editor #hud, body.editor #title { display: none !important; }
       #editor { position: absolute; inset: 0; pointer-events: none; font-size: 13px; }

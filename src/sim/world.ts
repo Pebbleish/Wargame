@@ -63,6 +63,13 @@ export interface Unit {
 
 export type Note = 'bracing' | 'fallingBack' | 'ammo';
 
+/** A regiment brought to a battle from outside it (the campaign): its arm, strength and experience. */
+export interface ArmyEntry {
+  type: UnitTypeId;
+  men: number;
+  xp: number;
+}
+
 /** What drags a side's army morale down, in points. */
 export interface MoraleBreakdown {
   losses: number;
@@ -269,6 +276,9 @@ export class World {
   impacts: Impact[] = [];
   carts: Cart[] = [];
   smarts: [Smarts, Smarts] = [{ ...ALL_SMARTS }, { ...ALL_SMARTS }];
+  reinforcements = true; // false: no manpower and no call-ins (campaign battles, the tutorial)
+  autoEnd = true; // false: the battle only ends when told to (the tutorial)
+  endWhenWiped = false; // a side with no fighting regiments left on the field loses
   private lastCartLog: [number, number] = [-99, -99];
   rng: Rng;
   private nextId = 1;
@@ -301,6 +311,41 @@ export class World {
   /** The two towns on a side's own half, where its starting army stands. */
   homeTowns(side: Side): Vec[] {
     return OBJECTIVES.filter((o) => o.home === side);
+  }
+
+  /**
+   * Field given armies instead of the usual starting ones (campaign battles, the tutorial): each side's regiments,
+   * with their strength and experience, drawn up in rows in front of its home towns, plus its general and a supply
+   * train. Returns the unit id each regiment became, in order, so the survivors can be matched up afterwards.
+   */
+  fieldArmies(armies: [ArmyEntry[], ArmyEntry[]]): [number[], number[]] {
+    this.units = [];
+    const out: [number[], number[]] = [[], []];
+    for (const side of [0, 1] as Side[]) {
+      const s = this.sides[side];
+      s.nameCounters = { line: 0, light: 0, cavalry: 0, artillery: 0, engineers: 0, supply: 0, general: 0 };
+      const [a, b] = this.homeTowns(side);
+      const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+      const dir = side === 0 ? 1 : -1;
+      const order: UnitTypeId[] = ['line', 'light', 'artillery', 'cavalry', 'engineers', 'supply'];
+      const list = armies[side].map((e, i) => ({ e, i })).sort((p, q) => order.indexOf(p.e.type) - order.indexOf(q.e.type));
+      const perRow = 6;
+      list.forEach(({ e, i }, k) => {
+        const row = Math.floor(k / perRow);
+        const inRow = Math.min(perRow, list.length - row * perRow);
+        const col = (k % perRow) - (inRow - 1) / 2;
+        const p = clampToMap({ x: mid.x + dir * (200 - row * 170), y: mid.y + col * 180 }, RULES.borderWidth + 80);
+        const u = this.spawn(side, e.type, p.x, p.y, { brigade: this.brigadeFor(side, e.type), xp: e.xp });
+        u.men = Math.max(1, Math.min(u.maxMen, e.men));
+        out[side][i] = u.id;
+      });
+      const back = (dx: number, dy: number) => clampToMap({ x: mid.x - dir * dx, y: mid.y + dy }, RULES.borderWidth + 80);
+      const g = back(260, -120);
+      this.spawn(side, 'general', g.x, g.y, { brigade: 0 });
+      const w = back(420, 160);
+      this.spawn(side, 'supply', w.x, w.y, { brigade: 0 });
+    }
+    return out;
   }
 
   /** The starting army garrisons its two home towns; guns and horse wait between them. */
@@ -447,6 +492,7 @@ export class World {
     const s = this.sides[side];
     const def = UNIT_TYPES[type];
     if (this.phase === 'ended') return 'Battle over';
+    if (!this.reinforcements) return 'No reinforcements';
     if (this.phase === 'battle') {
       if (this.time >= RULES.callInCutoff) return 'Call-ins closed';
       if (s.cooldowns[type] > this.time) return 'Cooling down';
@@ -744,6 +790,7 @@ export class World {
   }
 
   private economy() {
+    if (!this.reinforcements) return;
     for (const side of [0, 1] as Side[]) {
       const s = this.sides[side];
       let perMinute = RULES.baseIncome;
@@ -1625,6 +1672,16 @@ export class World {
   }
 
   private checkEnd() {
+    if (!this.autoEnd) return;
+    if (this.endWhenWiped && this.phase === 'battle') {
+      const fighting = (side: Side) => this.units.some((u) => u.side === side && u.state !== 'routing' && !isSupport(u) && u.type !== 'engineers');
+      for (const side of [0, 1] as Side[]) {
+        if (!fighting(side)) {
+          this.end(fighting((1 - side) as Side) ? ((1 - side) as Side) : -1, `The ${this.sides[side].nation} army has been driven from the field`);
+          return;
+        }
+      }
+    }
     // Domination: holding every objective for long enough wins outright.
     for (const side of [0, 1] as Side[]) {
       const held = this.owners.filter((o) => o === side).length;
@@ -1652,7 +1709,7 @@ export class World {
     }
   }
 
-  private end(winner: Side | -1, reason: string) {
+  end(winner: Side | -1, reason: string) {
     this.phase = 'ended';
     this.result = { winner, reason };
     this.log(-1, reason);

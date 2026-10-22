@@ -1,7 +1,6 @@
 import { RULES } from '../sim/config';
-import { DOCTRINES } from '../sim/ai';
 import { OBJECTIVES } from '../sim/map';
-import { CHAPTERS, campaignProgress, setCampaignProgress } from './campaign';
+import { RANKS, SLOTS, deleteCampaign, loadCampaign, newCampaign, ownedBy, saveCampaign } from '../sim/strategic';
 import { savedMaps } from './maps';
 
 /**
@@ -64,8 +63,8 @@ export class TitleScreen {
   private splash = SPLASHES[Math.floor(Math.random() * SPLASHES.length)];
   private confirmClear = false;
   private mapChoice = ''; // the saved map to fight on in Singleplayer ('' for a new random field)
-  private chapter = -1; // the campaign battle picked in the list
-  private confirmReset = false;
+  private slot = 0; // the campaign save picked in the list
+  private confirmDelete = false;
 
   constructor(parent: HTMLElement) {
     this.root = document.createElement('div');
@@ -97,15 +96,26 @@ export class TitleScreen {
   private go(screen: Screen) {
     this.screen = screen;
     this.confirmClear = false;
-    this.confirmReset = false;
-    if (screen === 'campaign') this.chapter = Math.min(campaignProgress(), CHAPTERS.length - 1);
+    this.confirmDelete = false;
     this.render();
   }
 
-  private play(spectate: boolean, chapter?: number) {
-    const map = !spectate && chapter === undefined ? savedMaps().find((m) => m.name === this.mapChoice) : undefined;
+  private play(spectate: boolean) {
+    const map = !spectate ? savedMaps().find((m) => m.name === this.mapChoice) : undefined;
     this.hide();
-    window.dispatchEvent(new CustomEvent('wargame:play', { detail: { spectate, map, chapter } }));
+    window.dispatchEvent(new CustomEvent('wargame:play', { detail: { spectate, map } }));
+  }
+
+  /** Start or carry on the campaign in the picked slot. A new one, or one whose tutorial is not done, starts with the tutorial. */
+  private playSlot() {
+    let c = loadCampaign(this.slot);
+    if (!c) {
+      c = newCampaign(this.slot, 1 + Math.floor(Math.random() * 1e9));
+      saveCampaign(c);
+    }
+    this.hide();
+    if (!c.tutorialDone) window.dispatchEvent(new CustomEvent('wargame:battle', { detail: { kind: 'tutorial', slot: this.slot, title: 'Tutorial' } }));
+    else window.dispatchEvent(new CustomEvent('wargame:campaign', { detail: { slot: this.slot } }));
   }
 
   private click(e: MouseEvent) {
@@ -124,11 +134,11 @@ export class TitleScreen {
       this.mapChoice = names[(names.indexOf(this.mapChoice) + 1) % names.length];
       this.render();
     }
-    else if (a === 'chapter') { this.chapter = Number(t.dataset.i); this.render(); }
-    else if (a === 'begin') this.play(false, this.chapter);
-    else if (a === 'reset') {
-      if (this.confirmReset) { setCampaignProgress(0); this.go('campaign'); return; }
-      this.confirmReset = true;
+    else if (a === 'slot') { this.slot = Number(t.dataset.i); this.confirmDelete = false; this.render(); }
+    else if (a === 'begin') this.playSlot();
+    else if (a === 'delete') {
+      if (this.confirmDelete) { deleteCampaign(this.slot); this.go('campaign'); return; }
+      this.confirmDelete = true;
       this.render();
     }
     else if (a === 'watch') this.play(true);
@@ -190,22 +200,23 @@ export class TitleScreen {
       return;
     }
     if (this.screen === 'campaign') {
-      const done = campaignProgress();
-      const c = CHAPTERS[this.chapter];
-      const rows = CHAPTERS.map((ch, i) => {
-        const state = i < done ? 'Won' : i === done ? 'Next battle' : 'Locked';
-        return `<button class="mc-row ${i === this.chapter ? 'sel' : ''} ${i > done ? 'locked' : ''}" data-a="chapter" data-i="${i}" ${i > done ? 'disabled' : ''}>
-          <span class="t">${i + 1}. ${ch.title}</span><span class="s">${state}${i <= done ? ` · enemy plan: ${DOCTRINES[ch.doctrine].name}` : ''}</span></button>`;
+      const rows = Array.from({ length: SLOTS }, (_, i) => {
+        const c = loadCampaign(i);
+        const sub = !c ? 'Empty: start a new campaign'
+          : !c.tutorialDone ? 'Lieutenant · tutorial not finished'
+          : c.over ? `${c.over === 'won' ? 'The war is won' : 'The war is lost'} · day ${Math.floor(c.day) + 1}`
+          : `${RANKS[c.rank].name} · day ${Math.floor(c.day) + 1} · ${ownedBy(c, 0).length} of ${c.territories.length} towns · ${c.wins} victories`;
+        return `<button class="mc-row ${i === this.slot ? 'sel' : ''}" data-a="slot" data-i="${i}"><span class="t">Campaign ${i + 1}</span><span class="s">${sub}</span></button>`;
       }).join('');
+      const picked = loadCampaign(this.slot);
       r.innerHTML = `
         <div class="mc-screen">
           <h1>Campaign</h1>
-          <div class="mc-panel">${done >= CHAPTERS.length ? 'The war is won! Fight any battle again, or start over.' : `The war with Ostmark: ${CHAPTERS.length} battles, each against a general with a different plan. Win one to open the next.`}</div>
+          <div class="mc-panel">The war with Ostmark. You start as a lieutenant with a handful of regiments and learn the ropes, then lead an army across the country, town by town, until Ostmark's capital falls.</div>
           <div class="mc-list rows">${rows}</div>
-          ${c ? `<div class="mc-brief"><b>${c.title}</b><br>${c.briefing}${c.enemyBonus ? ` The enemy starts with ${c.enemyBonus} extra manpower.` : ''}</div>` : ''}
           <div class="mc-menu tight">
-            <button class="mc" data-a="begin" ${this.chapter > done ? 'disabled' : ''}>Begin Battle</button>
-            <div class="mc-pair"><button class="mc" data-a="reset">${this.confirmReset ? 'Click again to reset' : 'Start Over'}</button><button class="mc" data-a="back">Back</button></div>
+            <button class="mc" data-a="begin">${!picked ? 'New Campaign' : picked.tutorialDone ? 'Continue' : 'Continue Tutorial'}</button>
+            <div class="mc-pair"><button class="mc" data-a="delete" ${picked ? '' : 'disabled'}>${this.confirmDelete ? 'Click again to delete' : 'Delete Save'}</button><button class="mc" data-a="back">Back</button></div>
           </div>
         </div>`;
       return;
@@ -240,7 +251,7 @@ export class TitleScreen {
       ['How do I get more troops?', 'Call them in from the bar on the left, then click in your deployment zone. Manpower comes in over time, faster with more towns and depots held.'],
       ['How do I beat dug-in troops?', 'Shell them. Guns hit fortified troops much harder, and a near miss shakes them out of their works for a while.'],
       ['Does the AI learn?', 'Yes. It remembers how you fought in earlier battles and picks its plan with that in mind. You can make it forget under Settings.'],
-      ['How does the campaign work?', `It is a run of ${CHAPTERS.length} battles against Ostmark, each against a general with a different plan, and each harder than the last. Win a battle to open the next. Lose, and you can fight it again.`],
+      ['How does the campaign work?', 'Pick one of the two save slots. You start as a lieutenant in a tutorial battle, then lead an army on the campaign map: march by clicking, take towns, beat Ostmark\'s armies, recruit with the gold your towns pay, and win promotion for a bigger army. Take Ostgard, Ostmark\'s capital, to win.'],
       ['How do I make my own map?', 'Open the Map Editor from the title screen. Paint woods, hills and marsh, place towns, lay roads and a river with bridges, and give each side 2 home towns. Save it, then pick it with the Map button under Singleplayer. Share code turns a map into text you can send to a friend.'],
       ['Is there multiplayer?', 'Not yet. For now, every battle is against the AI.'],
       ['Where are the controls?', 'Press the ? button during a battle for the full list of keys and rules.'],

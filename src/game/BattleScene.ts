@@ -1,12 +1,12 @@
 import Phaser from 'phaser';
 import { MAP, RULES, UNIT_TYPES, UnitTypeId } from '../sim/config';
-import { AI, DOCTRINES } from '../sim/ai';
+import { AI } from '../sim/ai';
 import { mapFor } from '../sim/fairmaps';
 import { HabitWatcher, mergeHabits, parseHabits } from '../sim/habits';
 import { CROSSINGS, EARTHWORKS, MapData, OBJECTIVES, Vec, dist, terrainAt } from '../sim/map';
-import { Side, Unit, World, experienceOf, formationOf, inZone, isSupport, unitRadius, unitSize } from '../sim/world';
-import { CHAPTERS, campaignProgress, setCampaignProgress } from './campaign';
+import { ArmyEntry, Side, Unit, World, experienceOf, formationOf, inZone, isSupport, unitRadius, unitSize } from '../sim/world';
 import { Hud } from './hud';
+import { TUTORIAL_ARMY, TUTORIAL_MAP, Tutorial } from './tutorial';
 import { paintTerrain } from './terrain';
 
 const PLAYER: Side = 0;
@@ -64,7 +64,9 @@ export class BattleScene extends Phaser.Scene {
   private lastOwners: (Side | -1)[] = [];
   private inMenu = true; // the title screen is up, with an AI battle playing behind it
   private customMap: MapData | null = null; // a map from the editor, fought on instead of a generated one
-  private chapter: number | null = null; // the campaign battle being fought
+  private setup: BattleSetup | null = null; // a campaign battle or the tutorial, rather than a free battle
+  private fielded: [number[], number[]] = [[], []]; // the unit each campaign regiment became
+  private tutorial: Tutorial | null = null;
   private endNote = ''; // a line for the end screen: what the result means for the campaign
   private reported = false; // the end of this battle has been handled
   private playerSeed = 0; // the last battle the player fought or watched, so each new one is the next on the list
@@ -100,9 +102,16 @@ export class BattleScene extends Phaser.Scene {
       formation: (f) => this.world.apply({ kind: 'formation', side: PLAYER, ids: [...this.selected], formation: f }),
       resign: () => this.world.apply({ kind: 'resign', side: PLAYER }),
       menu: () => this.toMenu(),
+      campaign: () => this.returnToCampaign(),
+      skipTutorial: () => {
+        if (!this.tutorial || this.world.phase === 'ended') return;
+        this.tutorial.finished = true;
+        this.tutorial.skipped = true;
+        this.tutorial.step = this.tutorial.total;
+      },
       spectate: () => {
+        if (this.setup) return;
         this.spectating = !this.spectating;
-        this.chapter = null;
         this.seed += 1;
         this.newBattle();
         this.hud.reset();
@@ -111,8 +120,7 @@ export class BattleScene extends Phaser.Scene {
       aim: () => { if (this.selectedAimers().length) this.aiming = true; },
       ceaseFire: () => this.world.apply({ kind: 'ceaseFire', side: PLAYER, ids: this.selectedAimers().map((u) => u.id) }),
       restart: () => {
-        // A campaign battle is fought again on the same field; anything else moves on to the next.
-        if (this.chapter === null) this.seed += 1;
+        this.seed += 1;
         this.newBattle();
         this.hud.reset();
       },
@@ -130,8 +138,22 @@ export class BattleScene extends Phaser.Scene {
     this.setupInput();
     // The title screen starts a battle, opens a menu, or changes settings through these.
     window.addEventListener('wargame:play', (e) => {
-      const d = (e as CustomEvent<{ spectate: boolean; map?: MapData; chapter?: number }>).detail;
-      this.play(d.spectate, d.map, d.chapter);
+      const d = (e as CustomEvent<{ spectate: boolean; map?: MapData }>).detail;
+      this.play(d.spectate, d.map);
+    });
+    // The campaign map runs in its own scene; this one waits, hidden, until a battle is to be fought.
+    window.addEventListener('wargame:campaign', (e) => this.openCampaign({ slot: (e as CustomEvent<{ slot: number }>).detail.slot }));
+    window.addEventListener('wargame:battle', (e) => {
+      this.scene.stop('campaign');
+      this.scene.resume();
+      this.scene.setVisible(true);
+      this.play(false, undefined, (e as CustomEvent<BattleSetup>).detail);
+    });
+    window.addEventListener('wargame:campaignExit', () => {
+      this.scene.stop('campaign');
+      this.scene.resume();
+      this.scene.setVisible(true);
+      this.toMenu();
     });
     window.addEventListener('wargame:editor', () => {
       this.scene.pause();
@@ -151,13 +173,15 @@ export class BattleScene extends Phaser.Scene {
   }
 
   /** Leave the title screen for a battle: against the AI, or watching two AIs fight. */
-  private play(spectate: boolean, map?: MapData, chapter?: number) {
+  private play(spectate: boolean, map?: MapData, setup?: BattleSetup) {
     this.inMenu = false;
     this.spectating = spectate;
     this.customMap = map ?? null;
-    this.chapter = chapter ?? null;
+    this.setup = setup ?? null;
+    document.body.classList.toggle('campaign-battle', !!setup);
+    document.body.classList.toggle('tutorial', setup?.kind === 'tutorial');
     this.playerSeed = Math.max(this.playerSeed, this.seed < MENU_SEEDS ? this.seed : 0) + 1;
-    this.seed = chapter !== undefined ? CHAPTERS[chapter].seed : this.playerSeed;
+    this.seed = setup?.mapSeed ?? this.playerSeed;
     this.showLabels = loadLabelsPref();
     this.newBattle();
     this.speedIndex = loadSpeedPref();
@@ -165,16 +189,53 @@ export class BattleScene extends Phaser.Scene {
     this.fitCamera();
   }
 
-  /** A campaign battle won opens the next one. */
+  /** The tutorial checks its step after every tick, brings in the enemy's general for the counterattack, and ends the battle when done. */
+  private tutorStep() {
+    const t = this.tutorial!;
+    t.update(this.world, this.selectedUnits());
+    if (t.wave && !this.ais.length) this.ais = [new AI(1, this.seed)];
+    if (t.finished && this.world.phase !== 'ended') this.world.end(PLAYER, t.skipped ? 'Tutorial skipped' : `${t.villageName} is held`);
+    this.hud.showTutor({ title: t.title(), text: t.text(), step: t.step, total: t.total });
+  }
+
+  /** What a finished campaign battle or tutorial means, for the end screen. */
   private battleOver() {
     this.reported = true;
-    if (this.chapter === null || this.inMenu) return;
+    if (!this.setup || this.inMenu) return;
     const won = this.world.result?.winner === PLAYER;
-    const next = this.chapter + 1;
-    if (won && campaignProgress() < next) setCampaignProgress(next);
-    this.endNote = !won ? `Campaign: ${CHAPTERS[this.chapter].title} must be won before the campaign can go on.`
-      : next < CHAPTERS.length ? `Campaign: battle ${next} of ${CHAPTERS.length} won. Next: ${CHAPTERS[next].title}.`
-      : 'Campaign: the war is won!';
+    if (this.setup.kind === 'tutorial') this.endNote = 'You have been promoted to Captain. Your campaign begins.';
+    else this.endNote = won ? 'The field is ours. Back to the campaign map.' : 'We have been beaten. What is left of the army falls back.';
+  }
+
+  /** The regiments that came through the battle, on each side, in the order they were brought to it. */
+  private survivors(): [ArmyEntry[], ArmyEntry[]] {
+    const winner = this.world.result?.winner ?? -1;
+    const armies = this.setup?.kind === 'tutorial' ? [TUTORIAL_ARMY, []] : this.setup?.armies ?? [[], []];
+    return ([0, 1] as const).map((side) => armies[side].flatMap((e, i) => {
+      const u = this.world.unit(this.fielded[side][i]);
+      // A beaten side's regiments still running when it ends are lost.
+      if (!u || (winner === 1 - side && u.state === 'routing')) return [];
+      return [{ type: e.type, men: Math.round(u.men), xp: Math.round(u.xp) }];
+    })) as [ArmyEntry[], ArmyEntry[]];
+  }
+
+  private returnToCampaign() {
+    const setup = this.setup;
+    if (!setup) return;
+    const result = { kind: setup.kind, won: this.world.result?.winner === PLAYER, survivors: this.survivors(), skipped: setup.kind === 'tutorial' && !!this.tutorial?.skipped };
+    this.openCampaign({ slot: setup.slot, result });
+  }
+
+  private openCampaign(data: { slot: number; result?: unknown }) {
+    this.setup = null;
+    this.tutorial = null;
+    this.hud.showTutor(null);
+    document.body.classList.remove('campaign-battle', 'tutorial');
+    this.inMenu = true;
+    this.hud.reset();
+    this.scene.pause();
+    this.scene.setVisible(false);
+    this.scene.launch('campaign', data);
   }
 
   /** Back to the title screen, with a fresh AI battle playing behind it. */
@@ -182,7 +243,10 @@ export class BattleScene extends Phaser.Scene {
     this.inMenu = true;
     this.spectating = true;
     this.customMap = null;
-    this.chapter = null;
+    this.setup = null;
+    this.tutorial = null;
+    this.hud.showTutor(null);
+    document.body.classList.remove('campaign-battle', 'tutorial');
     this.seed = menuSeed();
     this.newBattle();
     this.hud.reset();
@@ -216,14 +280,30 @@ export class BattleScene extends Phaser.Scene {
   }
 
   private newBattle() {
-    this.world = new World(this.seed, undefined, this.customMap ?? mapFor(this.seed));
+    const setup = this.setup;
+    const tutorial = setup?.kind === 'tutorial';
+    this.world = new World(this.seed, undefined, tutorial ? TUTORIAL_MAP : this.customMap ?? setup?.mapSeed ?? mapFor(this.seed));
     this.buildMap();
-    // The AI remembers how the player fought in earlier battles and picks its plan with that in mind; in the
-    // campaign each battle's enemy general has a set plan instead.
-    const ch = this.chapter !== null ? CHAPTERS[this.chapter] : null;
-    if (ch) this.world.sides[1].manpower += ch.enemyBonus;
+    this.tutorial = null;
+    if (setup) {
+      // Campaign battles and the tutorial are fought with the armies brought to them, and nothing more.
+      this.world.reinforcements = false;
+      this.world.endWhenWiped = true;
+      this.fielded = this.world.fieldArmies(tutorial ? [TUTORIAL_ARMY, []] : setup.armies!);
+      for (const side of [0, 1]) this.world.sides[side].manpower = 0;
+    }
+    if (tutorial) {
+      this.world.autoEnd = false;
+      this.tutorial = new Tutorial(this.world);
+      for (const side of [0, 1] as const) this.world.apply({ kind: 'ready', side });
+      // Every order the player gives is shown to the sergeant, who checks them off.
+      const apply = this.world.apply.bind(this.world);
+      this.world.apply = (c) => { if (c.side === PLAYER) this.tutorial?.onCommand(c); apply(c); };
+    }
+    // The AI remembers how the player fought in earlier battles and picks its plan with that in mind. In the
+    // tutorial the enemy only gets a general once its counterattack goes in.
     this.ais = this.spectating ? [new AI(0, this.seed), new AI(1, this.seed)]
-      : [new AI(1, this.seed, { habits: loadHabits(), doctrine: ch ? DOCTRINES[ch.doctrine] : undefined })];
+      : tutorial ? [] : [new AI(1, this.seed, setup ? {} : { habits: loadHabits() })];
     this.endNote = '';
     this.reported = false;
     this.watcher = this.spectating ? null : new HabitWatcher(PLAYER);
@@ -585,6 +665,7 @@ export class BattleScene extends Phaser.Scene {
         this.world.step();
         this.acc -= STEP;
         // Once the battle is over, add how the player fought to the record.
+        if (this.tutorial) this.tutorStep();
         if (this.world.phase === 'ended' && !this.reported) this.battleOver();
         if (this.watcher && this.world.phase === 'ended') {
           if (this.world.time > 120) saveHabits(mergeHabits(loadHabits(), this.watcher.result()));
@@ -618,6 +699,7 @@ export class BattleScene extends Phaser.Scene {
         spectating: this.spectating,
         labels: this.showLabels,
         endNote: this.endNote,
+        campaignReturn: this.setup ? (this.setup.kind === 'tutorial' ? 'Begin the campaign' : 'Return to the campaign map') : undefined,
       });
     }
   }
@@ -751,6 +833,15 @@ export class BattleScene extends Phaser.Scene {
     this.zones.lineStyle(3, COLORS[0].fill, deploying ? 0.7 : 0.3);
     this.zones.lineBetween(z0, 0, z0, MAP.height);
     this.zones.lineBetween(z1, 0, z1, MAP.height);
+    // The tutorial's marker: where the sergeant wants you to go or look.
+    const mark = this.tutorial?.marker();
+    if (mark) {
+      const pulse = 0.5 + 0.5 * Math.sin(this.time.now / 250);
+      this.zones.lineStyle(8, 0xffe066, 0.5 + 0.4 * pulse);
+      this.zones.strokeCircle(mark.x, mark.y, 110 + pulse * 25);
+      this.zones.fillStyle(0xffe066, 0.18);
+      this.zones.fillCircle(mark.x, mark.y, 110);
+    }
     this.zones.lineStyle(3, COLORS[1].fill, 0.35);
     this.zones.lineBetween(MAP.width - z0, 0, MAP.width - z0, MAP.height);
     this.zones.lineBetween(MAP.width - z1, 0, MAP.width - z1, MAP.height);
@@ -1210,6 +1301,15 @@ export class BattleScene extends Phaser.Scene {
       to.x - Math.cos(a + 0.4) * s, to.y - Math.sin(a + 0.4) * s,
     );
   }
+}
+
+/** A battle the campaign asks for: the tutorial, or a fight on the campaign map with the armies there. */
+export interface BattleSetup {
+  kind: 'campaign' | 'tutorial';
+  slot: number;
+  armies?: [ArmyEntry[], ArmyEntry[]];
+  mapSeed?: number;
+  title: string;
 }
 
 const HABITS_KEY = 'wargame.habits';

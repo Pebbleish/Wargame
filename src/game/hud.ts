@@ -19,6 +19,8 @@ export interface HudHandlers {
   speed(delta: number): void;
   jump(at: Vec, unitId?: number): void;
   labels(): void;
+  campaign(): void; // back to the campaign map after a campaign battle or the tutorial
+  skipTutorial(): void;
 }
 
 /** A short notice in the alert list; clicking it moves the view to where it happened. */
@@ -38,6 +40,7 @@ export interface UiState {
   labels: boolean;
   spectating: boolean;
   endNote?: string; // what the result means for the campaign
+  campaignReturn?: string; // a campaign battle: the end screen's only button, back to the campaign map
 }
 
 const PLAYER = 0;
@@ -86,6 +89,7 @@ export class Hud {
   private alerts: Alert[] = [];
   private banner: HTMLDivElement;
   private endShown = false;
+  private tutor: HTMLDivElement;
 
   constructor(root: HTMLElement, private h: HudHandlers) {
     this.top = el('div', 'panel');
@@ -100,6 +104,10 @@ export class Hud {
     this.deploy.id = 'deploy';
     this.tooltip = el('div', 'panel');
     this.tooltip.id = 'tooltip';
+    this.tutor = el('div', 'panel');
+    this.tutor.id = 'tutor';
+    this.tutor.addEventListener('click', (e) => { if ((e.target as HTMLElement).dataset.a === 'skip') this.h.skipTutorial(); });
+    root.appendChild(this.tutor);
     this.end = el('div');
     this.end.id = 'end';
     this.controls = el('div', 'panel');
@@ -221,6 +229,7 @@ export class Hud {
     this.end.addEventListener('click', (e) => {
       if ((e.target as HTMLElement).dataset.a === 'again') this.h.restart();
       if ((e.target as HTMLElement).dataset.a === 'menu') this.h.menu();
+      if ((e.target as HTMLElement).dataset.a === 'campaign') this.h.campaign();
     });
 
     for (const e of [this.top, this.economy, this.captions, bar, this.selection, this.deploy, this.controls, this.help, this.alertBox, this.banner, this.tooltip, this.hint, this.end]) root.appendChild(e);
@@ -230,8 +239,9 @@ export class Hud {
     this.world = world;
     const [me, them] = world.sides;
     const mb = (v: number, c: string) => `<div class="bar"><div style="width:${Math.max(0, v)}%;background:${c}"></div></div>`;
-    const clockText = world.phase === 'deploy' ? clock(world.deployLeft) : clock(RULES.matchLength - world.time);
-    const sub = world.phase === 'deploy' ? 'deployment' : world.time >= RULES.finalPushAt ? 'final push · points ×2' : 'remaining';
+    // A battle with no time limit (the tutorial) counts up instead of down.
+    const clockText = world.phase === 'deploy' ? clock(world.deployLeft) : clock(world.autoEnd ? RULES.matchLength - world.time : world.time);
+    const sub = world.phase === 'deploy' ? 'deployment' : !world.autoEnd ? 'elapsed' : world.time >= RULES.finalPushAt ? 'final push · points ×2' : 'remaining';
     const held = (side: number) => world.owners.filter((o) => o === side).length;
     // What is draining the army's morale, biggest first, so it is clear what to fix.
     const drain = (side: 0 | 1) => {
@@ -364,6 +374,17 @@ export class Hud {
   }
 
   /** The few words by the pointer saying what a click will do. */
+  /** The sergeant's instructions in the tutorial: the step, what to do, and a way out. */
+  showTutor(t: { title: string; text: string; step: number; total: number } | null) {
+    if (!t) { this.tutor.style.display = 'none'; this.tutor.dataset.key = ''; return; }
+    const key = `${t.step}|${t.text}`;
+    this.tutor.style.display = 'block';
+    if (this.tutor.dataset.key === key) return;
+    this.tutor.dataset.key = key;
+    this.tutor.innerHTML = `<div class="who">Sergeant Brandt</div><div class="h">${t.title}</div><p>${t.text}</p>
+      <div class="foot"><span>${t.step < t.total ? `Step ${t.step + 1} of ${t.total}` : 'Tutorial complete'}</span>${t.step < t.total ? '<button data-a="skip">Skip tutorial</button>' : ''}</div>`;
+  }
+
   showHint(text: string | null, x: number, y: number, bad = false) {
     if (!text) {
       this.hint.style.display = 'none';
@@ -432,7 +453,7 @@ export class Hud {
       <tr><td>Men lost</td><td>${Math.round(a.lostMen).toLocaleString()}</td><td>${Math.round(b.lostMen).toLocaleString()}</td></tr>
       <tr><td>Army morale</td><td>${a.armyMorale.toFixed(0)}</td><td>${b.armyMorale.toFixed(0)}</td></tr></table>
       ${ui.endNote ? `<p><b>${ui.endNote}</b></p>` : ''}
-      <button data-a="again">${this.spectating ? 'Watch another' : 'Play again'}</button> <button data-a="menu">Main menu</button></div>`;
+      ${ui.campaignReturn ? `<button data-a="campaign">${ui.campaignReturn}</button></div>` : `<button data-a="again">${this.spectating ? 'Watch another' : 'Play again'}</button> <button data-a="menu">Main menu</button></div>`}`;
     this.end.style.display = 'flex';
   }
 
