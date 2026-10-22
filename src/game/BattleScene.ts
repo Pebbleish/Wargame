@@ -1,9 +1,9 @@
 import Phaser from 'phaser';
 import { MAP, RULES, UNIT_TYPES, UnitTypeId } from '../sim/config';
-import { AI } from '../sim/ai';
+import { AI, DOCTRINES } from '../sim/ai';
 import { mapFor } from '../sim/fairmaps';
 import { HabitWatcher, mergeHabits, parseHabits } from '../sim/habits';
-import { CROSSINGS, EARTHWORKS, MapData, OBJECTIVES, Vec, dist, terrainAt } from '../sim/map';
+import { CROSSINGS, EARTHWORKS, MapData, OBJECTIVES, Vec, clampToMap, dist, terrainAt } from '../sim/map';
 import { ArmyEntry, Side, Unit, World, experienceOf, formationOf, inZone, isSupport, unitRadius, unitSize } from '../sim/world';
 import { Hud } from './hud';
 import { TUTORIAL_ARMY, TUTORIAL_MAP, Tutorial } from './tutorial';
@@ -67,6 +67,7 @@ export class BattleScene extends Phaser.Scene {
   private setup: BattleSetup | null = null; // a campaign battle or the tutorial, rather than a free battle
   private fielded: [number[], number[]] = [[], []]; // the unit each campaign regiment became
   private tutorial: Tutorial | null = null;
+  private reliefArrived = false;
   private endNote = ''; // a line for the end screen: what the result means for the campaign
   private reported = false; // the end of this battle has been handled
   private playerSeed = 0; // the last battle the player fought or watched, so each new one is the next on the list
@@ -203,7 +204,30 @@ export class BattleScene extends Phaser.Scene {
     if (!this.setup || this.inMenu) return;
     const won = this.world.result?.winner === PLAYER;
     if (this.setup.kind === 'tutorial') this.endNote = 'You have been promoted to Captain. Your campaign begins.';
-    else this.endNote = won ? 'The field is ours. Back to the campaign map.' : 'We have been beaten. What is left of the army falls back.';
+    else {
+      const lordFell = this.setup.lord && this.world.sides[1].generalLost ? ` ${this.setup.lord} has been taken.` : '';
+      this.endNote = won
+        ? `${this.setup.defending ? 'The town has held.' : 'The field is ours.'}${lordFell} Back to the campaign map.`
+        : `${this.setup.defending ? 'The town has fallen.' : 'We have been beaten.'} What is left of the army falls back.`;
+    }
+  }
+
+  /** The relief column marches on from behind our towns; its regiments join the battle (and its survivors go home after). */
+  private reliefComes() {
+    const relief = this.setup!.relief!;
+    this.reliefArrived = true;
+    const w = this.world;
+    const homes = w.homeTowns(PLAYER);
+    const mid = { x: (homes[0].x + homes[1].x) / 2, y: (homes[0].y + homes[1].y) / 2 };
+    const back = mid.x < MAP.width / 2 ? -1 : 1;
+    relief.regiments.forEach((e, i) => {
+      const p = clampToMap({ x: mid.x + back * 350, y: mid.y + (i - (relief.regiments.length - 1) / 2) * 170 }, RULES.borderWidth + 60);
+      const u = w.spawn(PLAYER, e.type, p.x, p.y, { xp: e.xp });
+      u.men = e.men;
+      this.setup!.armies![0].push(e);
+      this.fielded[0].push(u.id);
+    });
+    w.log(-1, `${relief.name} has arrived!`);
   }
 
   /** The regiments that came through the battle, on each side, in the order they were brought to it. */
@@ -214,14 +238,17 @@ export class BattleScene extends Phaser.Scene {
       const u = this.world.unit(this.fielded[side][i]);
       // A beaten side's regiments still running when it ends are lost.
       if (!u || (winner === 1 - side && u.state === 'routing')) return [];
-      return [{ type: e.type, men: Math.round(u.men), xp: Math.round(u.xp) }];
+      return [{ ...e, men: Math.round(u.men), xp: Math.round(u.xp) }];
     })) as [ArmyEntry[], ArmyEntry[]];
   }
 
   private returnToCampaign() {
     const setup = this.setup;
     if (!setup) return;
-    const result = { kind: setup.kind, won: this.world.result?.winner === PLAYER, survivors: this.survivors(), skipped: setup.kind === 'tutorial' && !!this.tutorial?.skipped };
+    const result = {
+      kind: setup.kind, won: this.world.result?.winner === PLAYER, survivors: this.survivors(), skipped: setup.kind === 'tutorial' && !!this.tutorial?.skipped,
+      generalKilled: !!setup.lord && this.world.sides[1].generalLost, reliefArrived: this.reliefArrived,
+    };
     this.openCampaign({ slot: setup.slot, result });
   }
 
@@ -290,6 +317,15 @@ export class BattleScene extends Phaser.Scene {
       this.world.endWhenWiped = true;
       this.fielded = this.world.fieldArmies(tutorial ? [TUTORIAL_ARMY, []] : setup.armies!);
       for (const side of [0, 1]) this.world.sides[side].manpower = 0;
+      if (setup.lord) {
+        this.world.lords[1] = setup.lord;
+        const g = this.world.general(1);
+        if (g) g.name = setup.lord;
+      }
+      this.reliefArrived = false;
+      if (setup.defending) this.world.timePressure = [0, 1.5];
+      if (setup.relief) this.world.log(-1, `${setup.relief.name} is on the way: hold out for ${Math.round(setup.relief.at / 60)} minutes`);
+      if (setup.lord) this.world.log(-1, `${setup.lord} leads Ostmark in person: kill the general and their army breaks`);
     }
     if (tutorial) {
       this.world.autoEnd = false;
@@ -302,7 +338,7 @@ export class BattleScene extends Phaser.Scene {
     // The AI remembers how the player fought in earlier battles and picks its plan with that in mind. In the
     // tutorial the enemy has no AI: the tutorial gives it simple orders itself.
     this.ais = this.spectating ? [new AI(0, this.seed), new AI(1, this.seed)]
-      : tutorial ? [] : [new AI(1, this.seed, setup ? {} : { habits: loadHabits() })];
+      : tutorial ? [] : [new AI(1, this.seed, setup?.defending ? { doctrine: DOCTRINES.find((d) => d.name === 'Hammer'), params: { stand: 0 } } : setup ? {} : { habits: loadHabits() })];
     this.endNote = '';
     this.reported = false;
     this.watcher = this.spectating ? null : new HabitWatcher(PLAYER);
@@ -665,6 +701,7 @@ export class BattleScene extends Phaser.Scene {
         this.acc -= STEP;
         // Once the battle is over, add how the player fought to the record.
         if (this.tutorial) this.tutorStep();
+        if (this.setup?.relief && !this.reliefArrived && this.world.phase === 'battle' && this.world.time >= this.setup.relief.at) this.reliefComes();
         if (this.world.phase === 'ended' && !this.reported) this.battleOver();
         if (this.watcher && this.world.phase === 'ended') {
           if (this.world.time > 120) saveHabits(mergeHabits(loadHabits(), this.watcher.result()));
@@ -1318,6 +1355,9 @@ export interface BattleSetup {
   armies?: [ArmyEntry[], ArmyEntry[]];
   mapSeed?: number;
   title: string;
+  lord?: string; // the enemy's lord leads in person: killing the general breaks the army
+  defending?: boolean; // we hold a town under attack
+  relief?: { name: string; at: number; regiments: ArmyEntry[] }; // help that reaches the field at a given battle time
 }
 
 const HABITS_KEY = 'wargame.habits';

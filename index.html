@@ -210,7 +210,14 @@
       #camp .c-log .l span { color: var(--muted); font-size: 11px; }
       #camp .c-log .l.good { border-left-color: var(--good); }
       #camp .c-log .l.bad { border-left-color: var(--bad); }
-      #camp .c-tip { position: absolute; display: none; padding: 6px 8px; font-size: 12px; pointer-events: none; line-height: 1.4; }
+      #camp .c-tip { position: absolute; display: none; padding: 6px 8px; font-size: 12px; pointer-events: none; line-height: 1.4; min-width: 200px; max-width: 280px; }
+      #camp .c-tip .troops { margin: 4px 0; }
+      #camp .c-tip .troops div { display: flex; justify-content: space-between; gap: 12px; }
+      #camp .c-tip .odds { margin-top: 5px; padding-top: 4px; border-top: 1px solid rgba(140,123,88,0.35); }
+      #camp .good { color: var(--good); }
+      #camp .bad { color: var(--bad); }
+      #camp .c-modal .alert { display: inline-block; background: var(--bad); color: #fffaf0; font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; padding: 2px 8px; border-radius: 3px; margin-bottom: 4px; }
+      #camp .c-modal .lord { border-left: 3px solid var(--bad); padding-left: 8px; }
       #camp .c-modal { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(20,18,12,0.5); pointer-events: auto; }
       #camp .c-modal .panel { padding: 18px 24px; width: min(520px, calc(100vw - 32px)); }
       #camp .c-modal h2 { font-family: 'EB Garamond', Georgia, serif; font-size: 30px; margin: 0; }

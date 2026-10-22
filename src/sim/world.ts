@@ -68,6 +68,8 @@ export interface ArmyEntry {
   type: UnitTypeId;
   men: number;
   xp: number;
+  army?: number; // campaign: the allied or enemy army this regiment belongs to (none: the player's own)
+  town?: number; // campaign: the town whose garrison it is
 }
 
 /** What drags a side's army morale down, in points. */
@@ -267,6 +269,9 @@ export class World {
   deployLeft = RULES.deploymentTime;
   deployTimeLimit = true; // false: deployment lasts until both sides are ready (the tutorial)
   deployKeepOut: { x: number; y: number; r: number } | null = null; // nobody may deploy inside this ring
+  lords: [string | null, string | null] = [null, null]; // campaign: a lord leading a side in person; losing them costs far more
+  lordLossMorale = 30; // extra army morale lost when a lord falls
+  timePressure: [number, number] = [1, 1]; // how hard the clock wears on each army (a town's defenders can wait; its attackers cannot)
   domination: [number, number] = [0, 0]; // seconds each side has held every objective
   time = 0;
   units: Unit[] = [];
@@ -1585,13 +1590,13 @@ export class World {
       if (atEdge || spent) {
         this.sides[u.side].removed += 1;
         this.sides[1 - u.side].score += 2;
-        this.log(u.side, spent ? `${u.name} has been destroyed` : `${u.name} has deserted the field`);
         if (u.type === 'general') {
           const s = this.sides[u.side];
+          const lord = this.lords[u.side];
           s.generalLost = true;
-          s.objectiveDrain += RULES.generalLossMorale;
-          this.log(-1, `The ${s.nation} general has fallen!`);
-        }
+          s.objectiveDrain += RULES.generalLossMorale + (lord ? this.lordLossMorale : 0);
+          this.log(-1, lord ? `${lord} has fallen! The ${s.nation} army loses heart` : `The ${s.nation} general has fallen!`);
+        } else this.log(u.side, spent ? `${u.name} has been destroyed` : `${u.name} has deserted the field`);
         for (const o of this.units) if (o.meleeWith === u.id) o.meleeWith = null;
         continue;
       }
@@ -1646,7 +1651,7 @@ export class World {
   private armyMorale() {
     if (this.time > RULES.timePressureAt) {
       // The clock wears on both armies, but less on the one already losing, so a lead can still be overturned.
-      const drain = [0, 1].map((side) => (RULES.timePressureRate / 60) * DT * (this.behind(side as Side) ? RULES.timePressureBehind : 1));
+      const drain = [0, 1].map((side) => (RULES.timePressureRate / 60) * DT * (this.behind(side as Side) ? RULES.timePressureBehind : 1) * this.timePressure[side]);
       this.sides[0].timeDrain += drain[0];
       this.sides[1].timeDrain += drain[1];
     }
